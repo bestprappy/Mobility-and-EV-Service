@@ -22,3 +22,23 @@ spring:
 eureka:
   client:
     enabled: false
+
+navio:
+  mobility:
+    providers:
+      google-maps:
+        api-key: test-google-api-key
+        places:
+          base-url: https://places.googleapis.test/v1
+          connect-timeout: 100ms
+          read-timeout: 500ms
+        routes:
+          base-url: https://routes.googleapis.test/directions/v2:computeRoutes
+          connect-timeout: 100ms
+          read-timeout: 500ms
+        cache:
+          place-fresh-ttl: 1m
+          place-stale-ttl: 5m
+          route-fresh-ttl: 1m
+          route-stale-ttl: 5m
+          maximum-size: 100
