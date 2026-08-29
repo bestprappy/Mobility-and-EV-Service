@@ -4,6 +4,17 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Environment / secrets ###
+.env
+.env.*
+!.env.example
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
 ### STS ###
 .apt_generated
 .classpath
