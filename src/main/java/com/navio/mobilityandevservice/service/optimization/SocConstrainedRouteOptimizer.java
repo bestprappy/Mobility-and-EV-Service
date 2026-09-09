@@ -191,6 +191,18 @@ public class SocConstrainedRouteOptimizer {
             return options;
         }
 
+        // An explicit per-stop target is an itinerary constraint, including a 100% target.
+        Integer stopTarget = request.stops().stream()
+                .filter(stop -> stop.itemId().equals(candidate.existingItemId()))
+                .map(stop -> stop.targetBatteryPct())
+                .filter(java.util.Objects::nonNull)
+                .findFirst().orElse(null);
+        if (stopTarget != null) {
+            int departurePct = Math.max(label.socPct(), Math.min(100, Math.max(0, stopTarget)));
+            return List.of(new DepartureOption(departurePct,
+                    chargeMinutes(label.socPct(), departurePct, candidate.charger(), request.vehicle())));
+        }
+
         Set<Integer> targetSocValues = new LinkedHashSet<>();
         targetSocValues.add((int) Math.round(request.targetSocPct()));
         int firstBucket = roundUp(label.socPct() + 1, CHARGE_BUCKET_SIZE_PCT);

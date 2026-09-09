@@ -174,6 +174,26 @@ class EvRouteOptimizationServiceTests {
         assertThat(response.operations().getFirst().oldItemId()).isEqualTo("saved-item");
     }
 
+    @Test
+    void honorsAnExplicitFullBatteryTargetAndKeepsTheStation() {
+        EvChargerResponse station = charger("target-station", 13, 101, 150, 0.9, false);
+        EvRouteStopRequest stop = new EvRouteStopRequest("target-item", "Target station", 13, 101, station, false, EvChargerSelectionSource.MANUAL, 100);
+        assertThat(stop.effectiveLocked()).isTrue();
+        var request = new EvRouteOptimizationRequest("day-1", List.of(
+                new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null), stop,
+                new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null)),
+                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2)),
+                80.0, 10.0, 70.0, 20.0);
+        var response = optimize(request, candidate(station, 140, 1, "target-item"));
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).extracting(EvPlanOperation::type)
+                .doesNotContain(EvPlanOperationType.REMOVE_CHARGER, EvPlanOperationType.REPLACE_CHARGER);
+        assertThat(response.operations()).anySatisfy(operation -> {
+            assertThat(operation.oldItemId()).isEqualTo("target-item");
+                    assertThat(operation.departureSocPct()).isEqualTo(100);
+        });
+    }
+
     private OptimizationRouteSpan span(
             int index,
             EvRouteStopRequest from,

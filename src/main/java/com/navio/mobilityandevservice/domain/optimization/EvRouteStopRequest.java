@@ -14,14 +14,18 @@ public record EvRouteStopRequest(
         @DecimalMin("-180.0") @DecimalMax("180.0") double lng,
         @Valid EvChargerResponse charger,
         Boolean locked,
-        EvChargerSelectionSource selectionSource
+        EvChargerSelectionSource selectionSource,
+        @jakarta.validation.constraints.Min(0) @jakarta.validation.constraints.Max(100) Integer targetBatteryPct
 ) {
+    public EvRouteStopRequest(String itemId, String name, double lat, double lng, EvChargerResponse charger, Boolean locked, EvChargerSelectionSource selectionSource) {
+        this(itemId, name, lat, lng, charger, locked, selectionSource, null);
+    }
     public boolean chargerStop() {
         return charger != null;
     }
 
     public boolean effectiveLocked() {
-        return chargerStop() && Boolean.TRUE.equals(locked);
+        return chargerStop() && (Boolean.TRUE.equals(locked) || targetBatteryPct != null);
     }
 
     public EvChargerSelectionSource effectiveSelectionSource() {
