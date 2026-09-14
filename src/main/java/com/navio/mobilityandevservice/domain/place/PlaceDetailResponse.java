@@ -13,6 +13,7 @@ public record PlaceDetailResponse(
         String category,
         String description,
         Double rating,
-        Long reviewCount
+        Long reviewCount,
+        PlaceLocation placeLocation
 ) {
 }

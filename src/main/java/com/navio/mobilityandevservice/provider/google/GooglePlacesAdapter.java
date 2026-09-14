@@ -44,6 +44,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             "id",
             "displayName",
             "formattedAddress",
+            "addressComponents",
             "location",
             "internationalPhoneNumber",
             "nationalPhoneNumber",
@@ -268,7 +269,8 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 category,
                 category,
                 place.rating(),
-                place.userRatingCount()
+                place.userRatingCount(),
+                GooglePlaceLocationMapper.map(place.addressComponents())
         );
     }
 
@@ -525,7 +527,8 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             Long userRatingCount,
             GoogleText primaryTypeDisplayName,
             String businessStatus,
-            GoogleEvChargeOptions evChargeOptions
+            GoogleEvChargeOptions evChargeOptions,
+            List<GoogleAddressComponent> addressComponents
     ) {
     }
 

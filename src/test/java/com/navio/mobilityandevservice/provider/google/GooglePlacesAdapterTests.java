@@ -77,11 +77,17 @@ class GooglePlacesAdapterTests {
     void mapsPlaceDetailsToProviderIndependentContract() {
         server.expect(requestTo("https://places.googleapis.com/v1/places/place-123?sessionToken=session-123"))
                 .andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Goog-FieldMask", containsString("addressComponents")))
                 .andRespond(withSuccess("""
                         {
                           "id": "place-123",
                           "displayName": {"text": "Central Park"},
                           "formattedAddress": "New York, NY, USA",
+                          "addressComponents": [
+                            {"longText":"New York", "shortText":"New York", "types":["locality", "political"]},
+                            {"longText":"New York", "shortText":"NY", "types":["administrative_area_level_1", "political"]},
+                            {"longText":"United States", "shortText":"US", "types":["country", "political"]}
+                          ],
                           "location": {"latitude": 40.785091, "longitude": -73.968285},
                           "internationalPhoneNumber": "+1 212-310-6600",
                           "websiteUri": "https://www.centralparknyc.org/",
@@ -98,6 +104,8 @@ class GooglePlacesAdapterTests {
         var response = adapter.getDetail("place-123", "session-123");
 
         assertThat(response.name()).isEqualTo("Central Park");
+        assertThat(response.placeLocation().city()).isEqualTo("New York");
+        assertThat(response.placeLocation().countryCode()).isEqualTo("US");
         assertThat(response.location().lat()).isEqualTo(40.785091);
         assertThat(response.location().lng()).isEqualTo(-73.968285);
         assertThat(response.openingHours().openNow()).isTrue();
