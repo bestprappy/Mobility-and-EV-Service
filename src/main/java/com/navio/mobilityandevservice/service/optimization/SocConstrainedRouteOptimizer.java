@@ -1,7 +1,7 @@
 package com.navio.mobilityandevservice.service.optimization;
 
 import com.navio.mobilityandevservice.domain.ev.EvChargerResponse;
-import com.navio.mobilityandevservice.domain.ev.EvConnectorType;
+import com.navio.mobilityandevservice.service.simulation.EvSimulationModel;
 import com.navio.mobilityandevservice.domain.optimization.EvRouteOptimizationRequest;
 import com.navio.mobilityandevservice.domain.optimization.EvRouteStopRequest;
 import com.navio.mobilityandevservice.domain.optimization.EvVehicleSpec;
@@ -20,19 +20,15 @@ import java.util.Set;
 @Component
 public class SocConstrainedRouteOptimizer {
 
-    private static final Set<EvConnectorType> DC_CONNECTORS = Set.of(
-            EvConnectorType.CCS1,
-            EvConnectorType.CCS2,
-            EvConnectorType.CHADEMO,
-            EvConnectorType.NACS,
-            EvConnectorType.GB_T
-    );
-    private static final double ENERGY_SAFETY_FACTOR = 1.12;
     private static final int MAX_CHARGE_SOC_PCT = 92;
     private static final int CHARGE_BUCKET_SIZE_PCT = 5;
-    private static final long CHARGING_STOP_OVERHEAD_SECONDS = 5 * 60L;
+    private static final long CHARGING_STOP_OVERHEAD_SECONDS = (long) (EvSimulationModel.POLICY.stopOverheadMinutes() * 60);
 
     OptimizationSearchResult optimize(OptimizationRoute route, EvRouteOptimizationRequest request) {
+        if (request.startingSocPct() < request.reserveSocPct()) {
+            return new OptimizationSearchResult(false, 0, 0, 0, List.of(),
+                    List.of("Starting SOC is below the configured reserve. Charge before planning this route."));
+        }
         List<SearchLabel> labels = List.of(SearchLabel.start((int) Math.floor(request.startingSocPct())));
         List<String> warnings = new ArrayList<>();
 
@@ -199,8 +195,9 @@ public class SocConstrainedRouteOptimizer {
                 .findFirst().orElse(null);
         if (stopTarget != null) {
             int departurePct = Math.max(label.socPct(), Math.min(100, Math.max(0, stopTarget)));
-            return List.of(new DepartureOption(departurePct,
-                    chargeMinutes(label.socPct(), departurePct, candidate.charger(), request.vehicle())));
+            int minutes = chargeMinutes(label.socPct(), departurePct, candidate.charger(), request.vehicle());
+            if (departurePct > label.socPct() && minutes == 0) return List.of();
+            return List.of(new DepartureOption(departurePct, minutes));
         }
 
         Set<Integer> targetSocValues = new LinkedHashSet<>();
@@ -259,8 +256,8 @@ public class SocConstrainedRouteOptimizer {
     }
 
     private int consumedSocPct(double distanceKm, EvVehicleSpec vehicle) {
-        double energyKwh = distanceKm * vehicle.consumptionKwhPer100km() / 100.0 * ENERGY_SAFETY_FACTOR;
-        return Math.max(1, (int) Math.ceil(energyKwh / vehicle.batteryKwh() * 100));
+        double energyKwh = EvSimulationModel.planningEnergy(distanceKm, vehicle.consumptionKwhPer100km());
+        return Math.max(0, (int) Math.ceil(energyKwh / vehicle.batteryKwh() * 100 - 1e-9));
     }
 
     private int chargeMinutes(
@@ -269,29 +266,7 @@ public class SocConstrainedRouteOptimizer {
             EvChargerResponse charger,
             EvVehicleSpec vehicle
     ) {
-        // Rate the stop on the connectors the car can actually plug into. A station that offers both
-        // CCS2 and Type 2 must be treated as AC for a Type 2 only car, otherwise the plan charges it
-        // at DC speed and badly under-estimates the stop.
-        List<EvConnectorType> usableConnectors = charger.connectorTypes().stream()
-                .filter(vehicle.connectorTypes()::contains)
-                .toList();
-        if (usableConnectors.isEmpty()) {
-            return 0;
-        }
-        boolean dc = usableConnectors.stream().anyMatch(DC_CONNECTORS::contains);
-        double vehicleLimitKw = dc ? vehicle.maxDcKw() : vehicle.maxAcKw();
-        double effectiveKw = Math.min(charger.maxKw(), vehicleLimitKw);
-        if (effectiveKw <= 0) {
-            return 0;
-        }
-
-        int lowerTarget = Math.min(targetSocPct, 80);
-        double fastEnergyKwh = Math.max(0, lowerTarget - arrivalSocPct) / 100.0 * vehicle.batteryKwh();
-        double taperedEnergyKwh = Math.max(0, targetSocPct - Math.max(arrivalSocPct, 80))
-                / 100.0 * vehicle.batteryKwh();
-        double hours = fastEnergyKwh / (effectiveKw * 0.90)
-                + taperedEnergyKwh / (effectiveKw * 0.45);
-        return Math.max(1, (int) Math.ceil(hours * 60));
+        return EvSimulationModel.chargeMinutes(arrivalSocPct, targetSocPct, charger, vehicle);
     }
 
     private boolean compatible(EvChargerResponse charger, EvVehicleSpec vehicle) {

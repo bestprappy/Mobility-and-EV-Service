@@ -1,0 +1,9 @@
+{
+  "version": "navio-simulation-v1",
+  "planningMarginFraction": 0.12,
+  "reserveSocPct": 12,
+  "chargeEfficiency": 0.9,
+  "dcTaperStartPct": 80,
+  "dcTaperPowerFraction": 0.5,
+  "stopOverheadMinutes": 5
+}

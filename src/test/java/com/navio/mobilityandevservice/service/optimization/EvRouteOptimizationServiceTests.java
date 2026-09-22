@@ -13,6 +13,8 @@ import com.navio.mobilityandevservice.domain.optimization.EvVehicleSpec;
 import com.navio.mobilityandevservice.domain.place.OpeningHoursResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceLocationResponse;
 import com.navio.mobilityandevservice.domain.route.DirectionsResponse;
+import com.navio.mobilityandevservice.domain.route.DirectionsRequest;
+import java.util.ArrayList;
 import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 import com.navio.mobilityandevservice.domain.route.RouteLineString;
 import com.navio.mobilityandevservice.domain.route.RouteSegmentResponse;
@@ -40,24 +42,7 @@ class EvRouteOptimizationServiceTests {
                 optimizer
         );
         EvRouteOptimizationRequest request = requestWithExistingCharger();
-        when(routeService.computeDirections(any())).thenReturn(new DirectionsResponse(List.of(
-                new RouteSegmentResponse(
-                        "segment",
-                        "day-1",
-                        "origin",
-                        "destination",
-                        "Origin",
-                        "Destination",
-                        RouteSegmentStatus.ROUTED,
-                        new RouteLineString(List.of(
-                                new RouteCoordinate(100, 13),
-                                new RouteCoordinate(103, 13)
-                        )),
-                        300_000L,
-                        14_400L,
-                        null
-                )
-        )));
+        stubRoadRoutes(routeService);
         when(chargerFinder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(
                 new OptimizationRouteSpan(
                         0,
@@ -149,7 +134,7 @@ class EvRouteOptimizationServiceTests {
                 chargerFinder,
                 new SocConstrainedRouteOptimizer()
         );
-        when(routeService.computeDirections(any())).thenReturn(new DirectionsResponse(List.of()));
+        stubRoadRoutes(routeService);
         when(chargerFinder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(
                 span(0, request.stops().get(0), request.stops().get(2), 30, 1_800, List.of()),
                 span(
@@ -194,6 +179,23 @@ class EvRouteOptimizationServiceTests {
         });
     }
 
+    private void stubRoadRoutes(RouteService service) {
+        when(service.computeDirections(any())).thenAnswer(invocation -> {
+            DirectionsRequest request = invocation.getArgument(0);
+            var group = request.groups().getFirst();
+            var legs = new ArrayList<RouteSegmentResponse>();
+            for (int i = 1; i < group.points().size(); i++) {
+                var from = group.points().get(i - 1);
+                var to = group.points().get(i);
+                long km = to.id().equals("midpoint") ? 30 : to.id().startsWith("ev-verify-") ? 140
+                        : from.id().startsWith("ev-verify-") ? 160 : 300;
+                legs.add(new RouteSegmentResponse("leg-" + i, group.blockId(), from.id(), to.id(), from.name(), to.name(),
+                        RouteSegmentStatus.ROUTED, null, km * 1000, km * 60, null));
+            }
+            return new DirectionsResponse(legs);
+        });
+    }
+
     private OptimizationRouteSpan span(
             int index,
             EvRouteStopRequest from,
@@ -231,7 +233,7 @@ class EvRouteOptimizationServiceTests {
                 chargerFinder,
                 new SocConstrainedRouteOptimizer()
         );
-        when(routeService.computeDirections(any())).thenReturn(new DirectionsResponse(List.of()));
+        stubRoadRoutes(routeService);
         when(chargerFinder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(
                 new OptimizationRouteSpan(
                         0,

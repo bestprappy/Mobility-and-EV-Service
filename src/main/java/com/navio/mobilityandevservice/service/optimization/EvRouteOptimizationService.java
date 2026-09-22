@@ -71,6 +71,9 @@ public class EvRouteOptimizationService {
                 replaceableStops
         );
         OptimizationSearchResult result = routeOptimizer.optimize(routeWithCandidates, request);
+        if (result.feasible()) {
+            result = OptimizedRouteVerifier.verify(routeWithCandidates, request, result, routeService);
+        }
         if (!result.feasible()) {
             return new EvRouteOptimizationResponse(
                     request.blockId(),
