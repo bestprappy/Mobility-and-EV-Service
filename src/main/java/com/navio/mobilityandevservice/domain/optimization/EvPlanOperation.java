@@ -8,9 +8,9 @@ public record EvPlanOperation(
         String beforeItemId,
         int sequence,
         EvChargerResponse charger,
-        int estimatedChargeMinutes,
-        int arrivalSocPct,
-        int departureSocPct,
+        double estimatedChargeMinutes,
+        double arrivalSocPct,
+        double departureSocPct,
         double detourKm,
         String reason
 ) {

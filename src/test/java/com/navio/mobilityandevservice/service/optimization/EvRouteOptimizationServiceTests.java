@@ -10,6 +10,7 @@ import com.navio.mobilityandevservice.domain.optimization.EvRouteOptimizationReq
 import com.navio.mobilityandevservice.domain.optimization.EvRouteOptimizationResponse;
 import com.navio.mobilityandevservice.domain.optimization.EvRouteStopRequest;
 import com.navio.mobilityandevservice.domain.optimization.EvVehicleSpec;
+import com.navio.mobilityandevservice.domain.energy.CanonicalEnergy;
 import com.navio.mobilityandevservice.domain.place.OpeningHoursResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceLocationResponse;
 import com.navio.mobilityandevservice.domain.route.DirectionsResponse;
@@ -103,7 +104,7 @@ class EvRouteOptimizationServiceTests {
 
         assertThat(response.feasible()).isTrue();
         assertThat(response.operations()).hasSize(1);
-        int acMinutes = response.operations().getFirst().estimatedChargeMinutes();
+        double acMinutes = response.operations().getFirst().estimatedChargeMinutes();
         assertThat(acMinutes).isGreaterThan(60);
 
         var dcResponse = optimize(
@@ -135,7 +136,7 @@ class EvRouteOptimizationServiceTests {
                         new EvRouteStopRequest("midpoint", "Midpoint", 13, 101, null, false, null),
                         new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null)
                 ),
-                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2)),
+                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null)),
                 80.0,
                 10.0,
                 70.0,
@@ -182,7 +183,7 @@ class EvRouteOptimizationServiceTests {
         var request = new EvRouteOptimizationRequest("day-1", List.of(
                 new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null), stop,
                 new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null)),
-                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2)),
+                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null)),
                 80.0, 10.0, 70.0, 20.0);
         var response = optimize(request, candidate(station, 140, 1, "target-item"));
         assertThat(response.feasible()).isTrue();
@@ -255,6 +256,43 @@ class EvRouteOptimizationServiceTests {
         return new OptimizationChargerCandidate(charger, progressKm, deviationKm, existingItemId);
     }
 
+    @org.junit.jupiter.api.Test
+    void continuousDepletionMatchesAnUnsplitRouteWithoutSafetyMultiplier() {
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var spans = new java.util.ArrayList<OptimizationRouteSpan>();
+        for (int i=0;i<1000;i++) spans.add(new OptimizationRouteSpan(i, request.stops().getFirst(), request.stops().getLast(), .09, 1, List.of(), List.of()));
+        var optimizer = new SocConstrainedRouteOptimizer();
+        var split = optimizer.optimize(new OptimizationRoute(spans), request);
+        var whole = optimizer.optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 90, 1000, List.of(), List.of()))), request);
+        assertThat(split.feasible()).isTrue();
+        assertThat(split.finalSocPct()).isCloseTo(50.0, org.assertj.core.data.Offset.offset(1e-8));
+        assertThat(split.finalSocPct()).isCloseTo(whole.finalSocPct(), org.assertj.core.data.Offset.offset(1e-8));
+        var fractional = new EvRouteOptimizationRequest(request.blockId(), request.stops(), request.vehicle(), 80.125, 10.0, 70.0, 20.0);
+        assertThat(optimizer.optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 0, 0, List.of(), List.of()))), fractional).finalSocPct()).isEqualTo(80.125);
+    }
+
+    @org.junit.jupiter.api.Test
+    void legacyUnknownCapacityDoesNotBecomeUsableOrZero() {
+        var base=requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request=new EvRouteOptimizationRequest(base.blockId(),base.stops(),new EvVehicleSpec(60.0,20.0,11.0,180.0,List.of(EvConnectorType.CCS2)),80.0,10.0,70.0,20.0);
+        var result=new SocConstrainedRouteOptimizer().optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0,request.stops().getFirst(),request.stops().getLast(),10,600,List.of(),List.of()))),request);
+        assertThat(result.feasible()).isFalse();
+        assertThat(result.finalSocPct()).isNull();
+        assertThat(result.warnings()).anyMatch(w -> w.contains("unavailable"));
+    }
+
+    @org.junit.jupiter.api.Test
+    void denseContinuousSearchIsBoundedAndNeverClaimsSuccessWhenCapped() {
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(5), () -> {
+            var request=requestWithVehicleConnectors(EvConnectorType.CCS2);
+            var candidates=new java.util.ArrayList<OptimizationChargerCandidate>();
+            for(int i=1;i<=80;i++) candidates.add(candidate(charger("dense-"+i,13,100+i*.01,50+i,.9,false),i*3,.001*i,null));
+            var result=new SocConstrainedRouteOptimizer().optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0,request.stops().getFirst(),request.stops().getLast(),300,18000,List.of(),candidates))),request);
+            if(result.feasible()) assertThat(result.finalSocPct()).isGreaterThanOrEqualTo(10);
+            else { assertThat(result.finalSocPct()).isNull(); assertThat(result.warnings()).anyMatch(w -> w.contains("search limit")); }
+        });
+    }
+
     private EvRouteOptimizationRequest requestWithVehicleConnectors(EvConnectorType... connectors) {
         return new EvRouteOptimizationRequest(
                 "day-1",
@@ -262,7 +300,7 @@ class EvRouteOptimizationServiceTests {
                         new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null),
                         new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null)
                 ),
-                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(connectors)),
+                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(connectors), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null)),
                 80.0,
                 10.0,
                 70.0,
@@ -286,7 +324,7 @@ class EvRouteOptimizationServiceTests {
                         ),
                         new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null)
                 ),
-                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2)),
+                new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null)),
                 80.0,
                 10.0,
                 70.0,

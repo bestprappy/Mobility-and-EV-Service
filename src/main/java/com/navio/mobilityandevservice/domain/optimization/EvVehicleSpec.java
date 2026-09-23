@@ -7,14 +7,22 @@ import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 
 import java.util.List;
+import com.navio.mobilityandevservice.domain.energy.CanonicalEnergy;
 
 public record EvVehicleSpec(
-        @NotNull @Positive Double batteryKwh,
-        @NotNull @Positive Double consumptionKwhPer100km,
-        @NotNull @PositiveOrZero Double maxAcKw,
-        @NotNull @PositiveOrZero Double maxDcKw,
-        @NotEmpty List<@NotNull EvConnectorType> connectorTypes
+        @PositiveOrZero Double batteryKwh,
+        @PositiveOrZero Double consumptionKwhPer100km,
+        @PositiveOrZero Double maxAcKw,
+        @PositiveOrZero Double maxDcKw,
+        @NotEmpty List<@NotNull EvConnectorType> connectorTypes,
+        @jakarta.validation.Valid CanonicalEnergy.Model energyModel
 ) {
+    public EvVehicleSpec(Double batteryKwh, Double consumptionKwhPer100km, Double maxAcKw, Double maxDcKw, List<EvConnectorType> connectorTypes) {
+        this(batteryKwh, consumptionKwhPer100km, maxAcKw, maxDcKw, connectorTypes, null);
+    }
+    public CanonicalEnergy.Model resolvedModel() {
+        return energyModel != null ? energyModel : new CanonicalEnergy.Model("CONSUMPTION", consumptionKwhPer100km, null, null);
+    }
     public EvVehicleSpec {
         connectorTypes = connectorTypes == null ? null : List.copyOf(connectorTypes);
     }

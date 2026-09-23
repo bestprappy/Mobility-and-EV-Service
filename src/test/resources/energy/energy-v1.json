@@ -1,0 +1,601 @@
+{
+  "policyVersion": "navio-energy-v1",
+  "tolerance": 1e-09,
+  "cases": [
+    {
+      "name": "consumption-60",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 18,
+        "nominalSocUsePct": 30,
+        "rawPredictedArrivalSocPct": 50
+      }
+    },
+    {
+      "name": "consumption-80",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 80,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 18,
+        "nominalSocUsePct": 22.5,
+        "rawPredictedArrivalSocPct": 57.5
+      }
+    },
+    {
+      "name": "rated-range",
+      "input": {
+        "model": {
+          "modelKind": "RATED_RANGE",
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": null,
+          "ratedRangeKm": 400
+        },
+        "distanceKm": 100,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": null,
+        "nominalSocUsePct": 25,
+        "rawPredictedArrivalSocPct": 55,
+        "provisional": true
+      }
+    },
+    {
+      "name": "range-with-capacity",
+      "input": {
+        "model": {
+          "modelKind": "RATED_RANGE",
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": 400
+        },
+        "distanceKm": 100,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 15,
+        "nominalSocUsePct": 25
+      }
+    },
+    {
+      "name": "consumption-no-capacity",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": null,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 18,
+        "nominalSocUsePct": null,
+        "departureSocPct": null
+      }
+    },
+    {
+      "name": "zero-distance",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 0,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 0,
+        "nominalSocUsePct": 0,
+        "rawPredictedArrivalSocPct": 80
+      }
+    },
+    {
+      "name": "negative-arrival",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 300,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": -20,
+        "displayArrivalSocPct": 0,
+        "departureSocPct": null,
+        "predictedLegFeasibility": "INFEASIBLE"
+      }
+    },
+    {
+      "name": "observation-recovery",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 300,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": 14,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": -20,
+        "departureSocPct": 14,
+        "predictedLegFeasibility": "INFEASIBLE",
+        "predictedArrivalReserveStatus": "BELOW_RESERVE"
+      }
+    },
+    {
+      "name": "reserve-observation",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 210,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": 14,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": 10,
+        "departureSocPct": 14,
+        "predictedArrivalReserveStatus": "BELOW_RESERVE"
+      }
+    },
+    {
+      "name": "missing-distance",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": null,
+        "distanceQuality": "UNAVAILABLE",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": null,
+        "rawPredictedArrivalSocPct": null,
+        "departureSocPct": null
+      }
+    },
+    {
+      "name": "fallback",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "FALLBACK",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "distanceQuality": "FALLBACK",
+        "rawPredictedArrivalSocPct": 50
+      }
+    },
+    {
+      "name": "unavailable",
+      "input": {
+        "model": {
+          "modelKind": "UNAVAILABLE",
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": null,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "availability": "UNAVAILABLE",
+        "nominalEnergyKwh": null
+      }
+    },
+    {
+      "name": "checkpoint-charge",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": 40,
+        "charging": {
+          "targetSocPct": 80,
+          "durationMinutes": null,
+          "compatible": true,
+          "effectivePowerKw": 60
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": 50,
+        "observedSocPct": 40,
+        "departureSocPct": 80,
+        "chargeEnergyKwh": 24,
+        "nominalChargeMinutes": 24
+      }
+    },
+    {
+      "name": "target-below-arrival",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": {
+          "targetSocPct": 40,
+          "durationMinutes": null,
+          "compatible": true,
+          "effectivePowerKw": 60
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "departureSocPct": 50,
+        "chargeEnergyKwh": 0,
+        "nominalChargeMinutes": 0
+      }
+    },
+    {
+      "name": "unknown-power",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": {
+          "targetSocPct": 80,
+          "durationMinutes": null,
+          "compatible": true,
+          "effectivePowerKw": null
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "departureSocPct": 80,
+        "chargeEnergyKwh": 18,
+        "nominalChargeMinutes": null
+      }
+    },
+    {
+      "name": "range-charge-no-capacity",
+      "input": {
+        "model": {
+          "modelKind": "RATED_RANGE",
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": null,
+          "ratedRangeKm": 400
+        },
+        "distanceKm": 100,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": {
+          "targetSocPct": 80,
+          "durationMinutes": null,
+          "compatible": true,
+          "effectivePowerKw": 60
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "departureSocPct": 80,
+        "chargeEnergyKwh": null,
+        "nominalChargeMinutes": null
+      }
+    },
+    {
+      "name": "infeasible-no-charge",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 300,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": {
+          "targetSocPct": 80,
+          "durationMinutes": null,
+          "compatible": true,
+          "effectivePowerKw": 60
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "departureSocPct": null,
+        "chargeEnergyKwh": null,
+        "nominalChargeMinutes": null
+      }
+    },
+    {
+      "name": "unknown connector compatibility cannot establish charged departure",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "consumptionKwhPer100km": 20,
+          "usableBatteryCapacityKwh": 60,
+          "ratedRangeKm": null
+        },
+        "distanceKm": 90,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "observedSocPct": null,
+        "charging": {
+          "targetSocPct": 80,
+          "durationMinutes": null,
+          "compatible": null,
+          "effectivePowerKw": null
+        },
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": 50,
+        "departureSocPct": null,
+        "chargeEnergyKwh": null,
+        "nominalChargeMinutes": null
+      }
+    }
+  ],
+  "trips": [
+    {
+      "name": "starting SoC, multiple observations and cross-day carry",
+      "model": {
+        "modelKind": "RATED_RANGE",
+        "ratedRangeKm": 100,
+        "consumptionKwhPer100km": null,
+        "usableBatteryCapacityKwh": null
+      },
+      "initialSocPct": 100,
+      "stops": [
+        {
+          "id": "a",
+          "dayId": "d1",
+          "distanceKm": 28,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": 68,
+          "charging": null
+        },
+        {
+          "id": "b",
+          "dayId": "d2",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": 50,
+          "charging": null
+        },
+        {
+          "id": "c",
+          "dayId": "d2",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        }
+      ],
+      "expected": [
+        {
+          "startingSocPct": 100,
+          "rawPredictedArrivalSocPct": 72,
+          "departureSocPct": 68
+        },
+        {
+          "startingSocPct": 68,
+          "rawPredictedArrivalSocPct": 58,
+          "departureSocPct": 50
+        },
+        {
+          "startingSocPct": 50,
+          "departureSocPct": 40
+        }
+      ]
+    },
+    {
+      "name": "removing observation restores predicted propagation",
+      "model": {
+        "modelKind": "RATED_RANGE",
+        "ratedRangeKm": 100,
+        "consumptionKwhPer100km": null,
+        "usableBatteryCapacityKwh": null
+      },
+      "initialSocPct": 100,
+      "stops": [
+        {
+          "id": "a",
+          "dayId": "d1",
+          "distanceKm": 28,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        },
+        {
+          "id": "b",
+          "dayId": "d2",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": 50,
+          "charging": null
+        },
+        {
+          "id": "c",
+          "dayId": "d2",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        }
+      ],
+      "expected": [
+        {
+          "departureSocPct": 72
+        },
+        {
+          "rawPredictedArrivalSocPct": 62,
+          "departureSocPct": 50
+        },
+        {
+          "departureSocPct": 40
+        }
+      ]
+    },
+    {
+      "name": "infeasible history, unknown downstream and observed zero recovery",
+      "model": {
+        "modelKind": "RATED_RANGE",
+        "ratedRangeKm": 100,
+        "consumptionKwhPer100km": null,
+        "usableBatteryCapacityKwh": null
+      },
+      "initialSocPct": 73,
+      "stops": [
+        {
+          "id": "a",
+          "dayId": "d1",
+          "distanceKm": 80,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        },
+        {
+          "id": "b",
+          "dayId": "d2",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        },
+        {
+          "id": "c",
+          "dayId": "d3",
+          "distanceKm": 10,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": 0,
+          "charging": null
+        },
+        {
+          "id": "d",
+          "dayId": "d3",
+          "distanceKm": 0,
+          "distanceQuality": "ROUTED",
+          "observedSocPct": null,
+          "charging": null
+        }
+      ],
+      "expected": [
+        {
+          "rawPredictedArrivalSocPct": -7,
+          "departureSocPct": null,
+          "predictedLegFeasibility": "INFEASIBLE"
+        },
+        {
+          "startingSocPct": null,
+          "rawPredictedArrivalSocPct": null,
+          "departureSocPct": null
+        },
+        {
+          "rawPredictedArrivalSocPct": null,
+          "departureSocPct": 0
+        },
+        {
+          "startingSocPct": 0,
+          "departureSocPct": 0
+        }
+      ]
+    }
+  ]
+}

@@ -15,8 +15,12 @@ public record EvRouteStopRequest(
         @Valid EvChargerResponse charger,
         Boolean locked,
         EvChargerSelectionSource selectionSource,
-        @jakarta.validation.constraints.Min(0) @jakarta.validation.constraints.Max(100) Integer targetBatteryPct
+        @jakarta.validation.constraints.Min(0) @jakarta.validation.constraints.Max(100) Integer targetBatteryPct,
+        @DecimalMin("0.0") @DecimalMax("100.0") Double observedSocPct
 ) {
+    public EvRouteStopRequest(String itemId, String name, double lat, double lng, EvChargerResponse charger, Boolean locked, EvChargerSelectionSource selectionSource, Integer targetBatteryPct) {
+        this(itemId, name, lat, lng, charger, locked, selectionSource, targetBatteryPct, null);
+    }
     public EvRouteStopRequest(String itemId, String name, double lat, double lng, EvChargerResponse charger, Boolean locked, EvChargerSelectionSource selectionSource) {
         this(itemId, name, lat, lng, charger, locked, selectionSource, null);
     }
@@ -25,7 +29,7 @@ public record EvRouteStopRequest(
     }
 
     public boolean effectiveLocked() {
-        return chargerStop() && (Boolean.TRUE.equals(locked) || targetBatteryPct != null);
+        return chargerStop() && (Boolean.TRUE.equals(locked) || targetBatteryPct != null || observedSocPct != null);
     }
 
     public EvChargerSelectionSource effectiveSelectionSource() {

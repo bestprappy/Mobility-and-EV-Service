@@ -6,9 +6,9 @@ public record EvRouteOptimizationResponse(
         String blockId,
         boolean feasible,
         List<EvPlanOperation> operations,
-        int finalSocPct,
+        Double finalSocPct,
         long totalDrivingSeconds,
-        int totalChargingMinutes,
+        double totalChargingMinutes,
         String message,
         List<String> warnings
 ) {

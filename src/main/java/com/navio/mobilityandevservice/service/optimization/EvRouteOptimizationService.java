@@ -56,7 +56,7 @@ public class EvRouteOptimizationService {
                     request.blockId(),
                     false,
                     List.of(),
-                    (int) Math.floor(request.startingSocPct()),
+                    request.startingSocPct(),
                     0,
                     0,
                     "Add at least a starting place and destination before optimizing the EV route.",
@@ -144,7 +144,8 @@ public class EvRouteOptimizationService {
                     distanceKm,
                     durationSeconds,
                     geometry,
-                    List.of()
+                    List.of(),
+                    segment != null && segment.distanceMeters() != null && segment.status() == com.navio.mobilityandevservice.domain.route.RouteSegmentStatus.ROUTED ? "ROUTED" : "FALLBACK"
             ));
         }
         return new OptimizationRoute(spans);

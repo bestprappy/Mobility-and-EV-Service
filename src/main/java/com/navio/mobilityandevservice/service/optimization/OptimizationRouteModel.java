@@ -19,8 +19,12 @@ record OptimizationRouteSpan(
         double distanceKm,
         long durationSeconds,
         List<RouteCoordinate> geometry,
-        List<OptimizationChargerCandidate> candidates
+        List<OptimizationChargerCandidate> candidates,
+        String distanceQuality
 ) {
+    OptimizationRouteSpan(int index, EvRouteStopRequest from, EvRouteStopRequest to, double distanceKm, long durationSeconds, List<RouteCoordinate> geometry, List<OptimizationChargerCandidate> candidates) {
+        this(index, from, to, distanceKm, durationSeconds, geometry, candidates, "ROUTED");
+    }
     OptimizationRouteSpan {
         geometry = List.copyOf(geometry);
         candidates = List.copyOf(candidates);
@@ -34,7 +38,8 @@ record OptimizationRouteSpan(
                 distanceKm,
                 durationSeconds,
                 geometry,
-                nextCandidates
+                nextCandidates,
+                distanceQuality
         );
     }
 }
@@ -52,18 +57,18 @@ record PlannedChargeStop(
         int sequence,
         String beforeItemId,
         OptimizationChargerCandidate candidate,
-        int arrivalSocPct,
-        int departureSocPct,
-        int chargeMinutes,
+        double arrivalSocPct,
+        double departureSocPct,
+        double chargeMinutes,
         double detourKm
 ) {
 }
 
 record OptimizationSearchResult(
         boolean feasible,
-        int finalSocPct,
+        Double finalSocPct,
         long totalDrivingSeconds,
-        int totalChargingMinutes,
+        double totalChargingMinutes,
         List<PlannedChargeStop> chargeStops,
         List<String> warnings
 ) {
