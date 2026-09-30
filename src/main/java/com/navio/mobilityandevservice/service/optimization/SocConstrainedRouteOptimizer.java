@@ -253,7 +253,7 @@ public class SocConstrainedRouteOptimizer {
         return CanonicalEnergy.calculate(new CanonicalEnergy.Input(vehicle.resolvedModel(), distanceKm, "ROUTED", 100.0, null, null, 12.0)).nominalSocUsePct();
     }
 
-    private Double chargeMinutes(double arrivalSocPct, double targetSocPct, EvChargerResponse charger, EvVehicleSpec vehicle) {
+    static Double chargeMinutes(double arrivalSocPct, double targetSocPct, EvChargerResponse charger, EvVehicleSpec vehicle) {
         var connectors = charger.connectorTypes().stream().filter(vehicle.connectorTypes()::contains).toList();
         Double limit = connectors.stream().map(c -> DC_CONNECTORS.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
                 .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);

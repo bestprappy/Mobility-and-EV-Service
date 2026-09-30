@@ -1,0 +1,18 @@
+{
+  "description": "Analytical verification cases, not measured EV validation data",
+  "energy": [
+    { "distanceKm": 0, "consumption": 16, "nominalKwh": 0, "planningKwh": 0 },
+    { "distanceKm": 200, "consumption": 16, "nominalKwh": 32, "planningKwh": 35.84 },
+    { "distanceKm": 190, "consumption": 16, "nominalKwh": 30.4, "planningKwh": 34.048 },
+    { "distanceKm": 110, "consumption": 16, "nominalKwh": 17.6, "planningKwh": 19.712 }
+  ],
+  "charging": [
+    { "arrival": 20, "target": 80, "battery": 60, "power": 100, "dc": true, "minutes": 24 },
+    { "arrival": 80, "target": 100, "battery": 60, "power": 100, "dc": true, "minutes": 16 },
+    { "arrival": 70, "target": 90, "battery": 60, "power": 100, "dc": true, "minutes": 12 },
+    { "arrival": 80, "target": 100, "battery": 60, "power": 10, "dc": false, "minutes": 80 },
+    { "arrival": 90, "target": 80, "battery": 60, "power": 100, "dc": true, "minutes": 0 },
+    { "arrival": 20, "target": 80, "battery": 60, "power": 0, "dc": true, "minutes": 0 },
+    { "arrival": 100, "target": 100, "battery": 60, "power": 100, "dc": true, "minutes": 0 }
+  ]
+}
