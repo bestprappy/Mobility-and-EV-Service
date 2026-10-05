@@ -33,6 +33,31 @@ import static org.mockito.Mockito.when;
 class EvRouteOptimizationServiceTests {
 
     @Test
+    void protectsChargerDayBoundariesWithoutMutatingSavedLockSettings() {
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        var optimizer = mock(SocConstrainedRouteOptimizer.class);
+        var first = new EvRouteStopRequest("first", "First", 13, 100,
+                charger("first",13,100,50,.9,false), false, EvChargerSelectionSource.MANUAL);
+        var last = new EvRouteStopRequest("last", "Last", 13, 103,
+                charger("last",13,103,50,.9,false), false, EvChargerSelectionSource.MANUAL);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(first,last), base.vehicle(),80.0,10.0,70.0,20.0);
+        stubRoadRoutes(routes);
+        when(finder.populateCandidates(any(),any(),any())).thenAnswer(call -> call.getArgument(0));
+        when(optimizer.optimize(any(),any())).thenAnswer(call -> {
+            EvRouteOptimizationRequest effective = call.getArgument(1);
+            assertThat(effective.stops().getFirst().effectiveLocked()).isTrue();
+            assertThat(effective.stops().getLast().effectiveLocked()).isTrue();
+            return new OptimizationSearchResult(false,null,0,0,List.of(),List.of());
+        });
+        new EvRouteOptimizationService(routes,finder,optimizer).optimize(request);
+        org.mockito.Mockito.verify(optimizer).optimize(any(),any());
+        assertThat(first.effectiveLocked()).isFalse();
+        assertThat(last.effectiveLocked()).isFalse();
+    }
+
+    @Test
     void replacesAnUnlockedChargerWhenTheSearchSelectsABetterCandidate() {
         RouteService routeService = mock(RouteService.class);
         RouteCorridorChargerFinder chargerFinder = mock(RouteCorridorChargerFinder.class);

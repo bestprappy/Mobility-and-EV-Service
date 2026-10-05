@@ -45,6 +45,29 @@ public class EvRouteOptimizationService {
     }
 
     public EvRouteOptimizationResponse optimize(EvRouteOptimizationRequest request) {
+        var preceding = PrecedingTripEnergy.resolve(request, routeService);
+        if (preceding.failure() != null) {
+            return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), null, 0, 0,
+                    preceding.failure(), List.of(preceding.failure()));
+        }
+        var stops = new ArrayList<>(request.stops());
+        if (!stops.isEmpty()) {
+            stops.set(0, protectEndpoint(stops.getFirst()));
+            stops.set(stops.size() - 1, protectEndpoint(stops.getLast()));
+        }
+        return optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
+                preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()));
+    }
+
+    private EvRouteStopRequest protectEndpoint(EvRouteStopRequest stop) {
+        if (!stop.chargerStop()) return stop;
+        // The actual day boundary cannot move when an unlocked charger is replaced.
+        // This is request-local protection, not a change to the saved user's lock setting.
+        return new EvRouteStopRequest(stop.itemId(), stop.name(), stop.lat(), stop.lng(), stop.charger(),
+                true, stop.selectionSource(), stop.targetBatteryPct(), stop.observedSocPct(), stop.estimatedChargeMinutes());
+    }
+
+    private EvRouteOptimizationResponse optimizeDay(EvRouteOptimizationRequest request) {
         List<EvRouteStopRequest> mandatoryStops = request.stops().stream()
                 .filter(stop -> !stop.chargerStop() || stop.effectiveLocked())
                 .toList();

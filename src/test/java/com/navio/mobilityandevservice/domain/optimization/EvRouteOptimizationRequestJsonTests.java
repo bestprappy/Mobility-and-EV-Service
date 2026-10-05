@@ -17,6 +17,27 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class EvRouteOptimizationRequestJsonTests {
 
+    @Test
+    void canonicalContextRoundTripsObservationsTargetsAndDurationWithoutDerivation() throws Exception {
+        var mapper = JsonMapper.builder().build();
+        var tree = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(TRIP_PLANNING_BODY);
+        var prior = tree.putArray("precedingDays").addObject();
+        prior.put("blockId", "previous-day");
+        prior.set("stops", tree.get("stops").deepCopy());
+        var charger = (com.fasterxml.jackson.databind.node.ObjectNode) prior.path("stops").get(1);
+        charger.put("observedSocPct", 0.0);
+        charger.put("targetBatteryPct", 80);
+        charger.put("estimatedChargeMinutes", 13);
+        var request = mapper.treeToValue(tree, EvRouteOptimizationRequest.class);
+        var reloaded = mapper.readValue(mapper.writeValueAsString(request), EvRouteOptimizationRequest.class);
+        assertThat(reloaded.precedingDays()).hasSize(1);
+        var saved = reloaded.precedingDays().getFirst().stops().get(1);
+        assertThat(saved.observedSocPct()).isZero();
+        assertThat(saved.targetBatteryPct()).isEqualTo(80);
+        assertThat(saved.estimatedChargeMinutes()).isEqualTo(13);
+        assertThat(reloaded.vehicle().energyModel()).isNull();
+    }
+
     private static final String TRIP_PLANNING_BODY = """
             {
               "blockId": "day-1",
