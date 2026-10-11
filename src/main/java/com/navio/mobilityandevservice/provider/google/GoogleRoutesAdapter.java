@@ -1,8 +1,13 @@
 package com.navio.mobilityandevservice.provider.google;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.navio.mobilityandevservice.domain.route.LegTravelMode;
+import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
+import com.navio.mobilityandevservice.domain.route.RouteLineString;
 import com.navio.mobilityandevservice.domain.route.RoutePointRequest;
 import com.navio.mobilityandevservice.domain.route.RouteProfile;
+import com.navio.mobilityandevservice.domain.route.RouteStepResponse;
+import com.navio.mobilityandevservice.domain.route.TransitLineResponse;
 import com.navio.mobilityandevservice.exception.ProviderClientException;
 import com.navio.mobilityandevservice.provider.RouteLeg;
 import com.navio.mobilityandevservice.provider.RoutePlan;
@@ -15,6 +20,7 @@ import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
 import java.util.List;
 
 @Component
@@ -29,6 +35,16 @@ public class GoogleRoutesAdapter implements RouteProvider {
             "routes.legs.polyline.encodedPolyline"
     );
 
+    // Steps are only worth their payload for transit, where they carry the line and its colour.
+    private static final String TRANSIT_FIELD_MASK = String.join(",",
+            ROUTE_FIELD_MASK,
+            "routes.legs.steps.travelMode",
+            "routes.legs.steps.distanceMeters",
+            "routes.legs.steps.staticDuration",
+            "routes.legs.steps.polyline.encodedPolyline",
+            "routes.legs.steps.transitDetails"
+    );
+
     private final RestClient restClient;
 
     public GoogleRoutesAdapter(@Qualifier("googleRoutesRestClient") RestClient restClient) {
@@ -40,11 +56,16 @@ public class GoogleRoutesAdapter implements RouteProvider {
         if (points.size() < 2) {
             throw new IllegalArgumentException("At least two route points are required");
         }
+        boolean transit = profile == RouteProfile.TRANSIT;
+        if (transit && points.size() != 2) {
+            // Google Routes rejects intermediate waypoints in transit mode.
+            throw new IllegalArgumentException("A transit route connects exactly two points");
+        }
 
         GoogleRouteRequest request = new GoogleRouteRequest(
                 waypoint(points.getFirst()),
                 waypoint(points.getLast()),
-                points.subList(1, points.size() - 1).stream().map(this::waypoint).toList(),
+                transit ? null : points.subList(1, points.size() - 1).stream().map(this::waypoint).toList(),
                 travelMode(profile),
                 profile == RouteProfile.DRIVING_TRAFFIC ? "TRAFFIC_AWARE" : null,
                 "HIGH_QUALITY",
@@ -56,18 +77,23 @@ public class GoogleRoutesAdapter implements RouteProvider {
             GoogleRoutesResponse response = restClient.post()
                     .uri("")
                     .contentType(MediaType.APPLICATION_JSON)
-                    .header("X-Goog-FieldMask", ROUTE_FIELD_MASK)
+                    .header("X-Goog-FieldMask", transit ? TRANSIT_FIELD_MASK : ROUTE_FIELD_MASK)
                     .body(request)
                     .retrieve()
                     .body(GoogleRoutesResponse.class);
 
             if (response == null || response.routes() == null || response.routes().isEmpty()) {
+                if (transit) {
+                    // No transit service between these points is an answer, not a provider failure;
+                    // throwing here would count against the circuit breaker shared with driving.
+                    return new RoutePlan(List.of());
+                }
                 throw new ProviderClientException("Google Routes returned no route");
             }
 
             GoogleRoute route = response.routes().getFirst();
             List<RouteLeg> legs = safeList(route.legs()).stream()
-                    .map(this::mapLeg)
+                    .map(leg -> transit ? mapTransitLeg(leg) : mapLeg(leg))
                     .toList();
 
             if (legs.isEmpty()) {
@@ -83,12 +109,103 @@ public class GoogleRoutesAdapter implements RouteProvider {
     }
 
     private RouteLeg mapLeg(GoogleRouteLeg leg) {
-        String encodedPolyline = leg.polyline() == null ? null : leg.polyline().encodedPolyline();
         return new RouteLeg(
-                EncodedPolylineDecoder.decode(encodedPolyline),
+                decode(leg.polyline()),
                 leg.distanceMeters() == null ? 0 : leg.distanceMeters(),
                 parseDurationSeconds(leg.duration())
         );
+    }
+
+    /**
+     * Maps a transit leg. Its duration is the time spent riding and walking, not the leg's
+     * door-to-door duration: that includes the wait for the first departure after "now", which
+     * says nothing about the trip being planned (at night it can be many hours).
+     */
+    private RouteLeg mapTransitLeg(GoogleRouteLeg leg) {
+        List<RouteStepResponse> steps = mergeWalks(safeList(leg.steps()).stream()
+                .map(this::mapStep)
+                .toList());
+        long movingSeconds = steps.stream()
+                .mapToLong(step -> step.durationSeconds() == null ? 0 : step.durationSeconds())
+                .sum();
+        return new RouteLeg(
+                decode(leg.polyline()),
+                leg.distanceMeters() == null ? 0 : leg.distanceMeters(),
+                steps.isEmpty() ? parseDurationSeconds(leg.duration()) : movingSeconds,
+                steps
+        );
+    }
+
+    private RouteStepResponse mapStep(GoogleRouteStep step) {
+        GoogleTransitDetails details = step.transitDetails();
+        boolean ride = "TRANSIT".equals(step.travelMode()) && details != null;
+        return new RouteStepResponse(
+                ride ? LegTravelMode.TRANSIT : LegTravelMode.WALK,
+                new RouteLineString(decode(step.polyline())),
+                step.distanceMeters(),
+                parseDurationSeconds(step.staticDuration()),
+                ride ? mapLine(details.transitLine()) : null,
+                ride ? stopName(details.stopDetails(), true) : null,
+                ride ? stopName(details.stopDetails(), false) : null,
+                ride ? details.stopCount() : null
+        );
+    }
+
+    private TransitLineResponse mapLine(GoogleTransitLine line) {
+        if (line == null) {
+            return new TransitLineResponse(null, null, null, null, null);
+        }
+        return new TransitLineResponse(
+                line.name(),
+                line.nameShort(),
+                hexColor(line.color()),
+                hexColor(line.textColor()),
+                line.vehicle() == null ? null : line.vehicle().type()
+        );
+    }
+
+    /** Google splits a walk into one step per turn; the planner only needs each walk once. */
+    private static List<RouteStepResponse> mergeWalks(List<RouteStepResponse> steps) {
+        List<RouteStepResponse> merged = new ArrayList<>();
+        for (RouteStepResponse step : steps) {
+            RouteStepResponse previous = merged.isEmpty() ? null : merged.getLast();
+            if (previous != null
+                    && previous.travelMode() == LegTravelMode.WALK
+                    && step.travelMode() == LegTravelMode.WALK) {
+                List<RouteCoordinate> coordinates = new ArrayList<>(previous.geometry().coordinates());
+                coordinates.addAll(step.geometry().coordinates());
+                merged.set(merged.size() - 1, new RouteStepResponse(
+                        LegTravelMode.WALK,
+                        new RouteLineString(coordinates),
+                        sum(previous.distanceMeters(), step.distanceMeters()),
+                        sum(previous.durationSeconds(), step.durationSeconds()),
+                        null, null, null, null));
+            } else {
+                merged.add(step);
+            }
+        }
+        return merged;
+    }
+
+    private static Long sum(Long first, Long second) {
+        return (first == null ? 0 : first) + (second == null ? 0 : second);
+    }
+
+    private static String stopName(GoogleStopDetails stopDetails, boolean departure) {
+        if (stopDetails == null) {
+            return null;
+        }
+        GoogleTransitStop stop = departure ? stopDetails.departureStop() : stopDetails.arrivalStop();
+        return stop == null ? null : stop.name();
+    }
+
+    /** Accepts only {@code #rgb}/{@code #rrggbb}, so a provider value can never inject style text. */
+    private static String hexColor(String value) {
+        return value != null && value.matches("#(?:[0-9a-fA-F]{3}){1,2}") ? value.toLowerCase() : null;
+    }
+
+    private static List<RouteCoordinate> decode(GooglePolyline polyline) {
+        return EncodedPolylineDecoder.decode(polyline == null ? null : polyline.encodedPolyline());
     }
 
     private GoogleWaypoint waypoint(RoutePointRequest point) {
@@ -100,6 +217,7 @@ public class GoogleRoutesAdapter implements RouteProvider {
             case DRIVING, DRIVING_TRAFFIC -> "DRIVE";
             case WALKING -> "WALK";
             case CYCLING -> "BICYCLE";
+            case TRANSIT -> "TRANSIT";
         };
     }
 
@@ -156,8 +274,43 @@ public class GoogleRoutesAdapter implements RouteProvider {
     private record GoogleRouteLeg(
             Long distanceMeters,
             String duration,
-            GooglePolyline polyline
+            GooglePolyline polyline,
+            List<GoogleRouteStep> steps
     ) {
+    }
+
+    private record GoogleRouteStep(
+            String travelMode,
+            Long distanceMeters,
+            String staticDuration,
+            GooglePolyline polyline,
+            GoogleTransitDetails transitDetails
+    ) {
+    }
+
+    private record GoogleTransitDetails(
+            GoogleStopDetails stopDetails,
+            GoogleTransitLine transitLine,
+            Integer stopCount
+    ) {
+    }
+
+    private record GoogleStopDetails(GoogleTransitStop departureStop, GoogleTransitStop arrivalStop) {
+    }
+
+    private record GoogleTransitStop(String name) {
+    }
+
+    private record GoogleTransitLine(
+            String name,
+            String nameShort,
+            String color,
+            String textColor,
+            GoogleTransitVehicle vehicle
+    ) {
+    }
+
+    private record GoogleTransitVehicle(String type) {
     }
 
     private record GooglePolyline(String encodedPolyline) {

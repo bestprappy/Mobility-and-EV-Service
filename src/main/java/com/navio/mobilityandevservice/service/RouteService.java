@@ -3,6 +3,7 @@ package com.navio.mobilityandevservice.service;
 import com.navio.mobilityandevservice.cache.StaleAwareCache;
 import com.navio.mobilityandevservice.domain.route.DirectionsRequest;
 import com.navio.mobilityandevservice.domain.route.DirectionsResponse;
+import com.navio.mobilityandevservice.domain.route.LegTravelMode;
 import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 import com.navio.mobilityandevservice.domain.route.RouteLineString;
 import com.navio.mobilityandevservice.domain.route.RoutePointGroupRequest;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
@@ -32,6 +34,8 @@ public class RouteService {
 
     private static final String CIRCUIT_BREAKER_NAME = "googleRoutes";
     private static final String FALLBACK_REASON = "Road route is temporarily unavailable";
+    private static final String TRANSIT_FALLBACK_REASON = "No public transit route was found";
+    private static final String WALK_FALLBACK_REASON = "Walking route is unavailable";
     private static final double EARTH_RADIUS_METERS = 6_371_000;
 
     private final RouteProvider routeProvider;
@@ -49,19 +53,18 @@ public class RouteService {
     }
 
     public DirectionsResponse computeDirections(DirectionsRequest request) {
-        RouteProfile profile = request.effectiveProfile();
+        RouteProfile drivingProfile = request.effectiveProfile();
         List<RouteSegmentResponse> segments = new ArrayList<>();
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            List<Future<List<RouteSegmentResponse>>> routeTasks = request.groups().stream()
-                    .map(group -> executor.submit(() -> {
-                        RoutePlan routePlan = resolveRoutePlan(profile, group.points());
-                        return toSegments(group, routePlan);
-                    }))
+            List<List<Future<List<RouteSegmentResponse>>>> groupTasks = request.groups().stream()
+                    .map(group -> submitRuns(executor, group, drivingProfile))
                     .toList();
 
-            for (Future<List<RouteSegmentResponse>> routeTask : routeTasks) {
-                segments.addAll(routeTask.get());
+            for (List<Future<List<RouteSegmentResponse>>> runTasks : groupTasks) {
+                for (Future<List<RouteSegmentResponse>> runTask : runTasks) {
+                    segments.addAll(runTask.get());
+                }
             }
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
@@ -71,6 +74,58 @@ public class RouteService {
         }
 
         return new DirectionsResponse(segments);
+    }
+
+    /** Routes each run of same-mode legs separately; results stay in leg order. */
+    private List<Future<List<RouteSegmentResponse>>> submitRuns(
+            ExecutorService executor,
+            RoutePointGroupRequest group,
+            RouteProfile drivingProfile
+    ) {
+        return legRuns(group.points()).stream()
+                .map(run -> executor.submit(() -> {
+                    RouteProfile profile = providerProfile(run.mode(), drivingProfile);
+                    RoutePlan routePlan = resolveRoutePlan(profile, run.points());
+                    return toSegments(group.blockId(), run, routePlan);
+                }))
+                .toList();
+    }
+
+    /**
+     * Splits a day into runs of consecutive legs that share a travel mode. Driving and walking runs
+     * keep their intermediate stops in one provider call, as before; transit cannot take
+     * intermediate stops, so every transit leg is a run of its own.
+     */
+    static List<LegRun> legRuns(List<RoutePointRequest> points) {
+        List<LegRun> runs = new ArrayList<>();
+        int runStart = 0;
+        for (int index = 1; index < points.size(); index++) {
+            LegTravelMode mode = legMode(points.get(index));
+            boolean lastLeg = index == points.size() - 1;
+            boolean breaksHere = mode == LegTravelMode.TRANSIT
+                    || lastLeg
+                    || legMode(points.get(index + 1)) != mode;
+            if (breaksHere) {
+                runs.add(new LegRun(mode, List.copyOf(points.subList(runStart, index + 1))));
+                runStart = index;
+            }
+        }
+        return runs;
+    }
+
+    private static LegTravelMode legMode(RoutePointRequest arrival) {
+        return arrival.arrivalMode() == null ? LegTravelMode.DRIVE : arrival.arrivalMode();
+    }
+
+    private static RouteProfile providerProfile(LegTravelMode mode, RouteProfile drivingProfile) {
+        return switch (mode) {
+            case DRIVE -> drivingProfile;
+            case TRANSIT -> RouteProfile.TRANSIT;
+            case WALK -> RouteProfile.WALKING;
+        };
+    }
+
+    record LegRun(LegTravelMode mode, List<RoutePointRequest> points) {
     }
 
     private RoutePlan resolveRoutePlan(RouteProfile profile, List<RoutePointRequest> points) {
@@ -87,22 +142,24 @@ public class RouteService {
     }
 
     private List<RouteSegmentResponse> toSegments(
-            RoutePointGroupRequest group,
+            String blockId,
+            LegRun run,
             RoutePlan routePlan
     ) {
         List<RouteSegmentResponse> segments = new ArrayList<>();
+        List<RoutePointRequest> points = run.points();
 
-        for (int index = 0; index < group.points().size() - 1; index++) {
-            RoutePointRequest from = group.points().get(index);
-            RoutePointRequest to = group.points().get(index + 1);
+        for (int index = 0; index < points.size() - 1; index++) {
+            RoutePointRequest from = points.get(index);
+            RoutePointRequest to = points.get(index + 1);
             RouteLeg leg = routePlan != null && routePlan.legs().size() > index
                     ? routePlan.legs().get(index)
                     : null;
 
             if (leg == null || leg.coordinates().size() < 2) {
-                segments.add(fallbackSegment(group.blockId(), from, to));
+                segments.add(fallbackSegment(blockId, run.mode(), from, to));
             } else {
-                segments.add(routedSegment(group.blockId(), from, to, leg));
+                segments.add(routedSegment(blockId, run.mode(), from, to, leg));
             }
         }
 
@@ -111,6 +168,7 @@ public class RouteService {
 
     private RouteSegmentResponse routedSegment(
             String blockId,
+            LegTravelMode mode,
             RoutePointRequest from,
             RoutePointRequest to,
             RouteLeg leg
@@ -126,12 +184,15 @@ public class RouteService {
                 new RouteLineString(leg.coordinates()),
                 leg.distanceMeters(),
                 leg.durationSeconds(),
-                null
+                null,
+                mode,
+                leg.steps()
         );
     }
 
     private RouteSegmentResponse fallbackSegment(
             String blockId,
+            LegTravelMode mode,
             RoutePointRequest from,
             RoutePointRequest to
     ) {
@@ -149,7 +210,13 @@ public class RouteService {
                 )),
                 Math.round(directDistanceMeters(from, to)),
                 null,
-                FALLBACK_REASON
+                switch (mode) {
+                    case DRIVE -> FALLBACK_REASON;
+                    case TRANSIT -> TRANSIT_FALLBACK_REASON;
+                    case WALK -> WALK_FALLBACK_REASON;
+                },
+                mode,
+                List.of()
         );
     }
 

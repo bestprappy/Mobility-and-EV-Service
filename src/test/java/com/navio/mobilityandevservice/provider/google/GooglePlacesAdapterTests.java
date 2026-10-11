@@ -97,6 +97,7 @@ class GooglePlacesAdapterTests {
                           },
                           "rating": 4.8,
                           "userRatingCount": 150000,
+                          "primaryType": "park",
                           "primaryTypeDisplayName": {"text": "Park"}
                         }
                         """, MediaType.APPLICATION_JSON));
@@ -110,6 +111,7 @@ class GooglePlacesAdapterTests {
         assertThat(response.location().lng()).isEqualTo(-73.968285);
         assertThat(response.openingHours().openNow()).isTrue();
         assertThat(response.category()).isEqualTo("Park");
+        assertThat(response.primaryType()).isEqualTo("park");
         assertThat(response.rating()).isEqualTo(4.8);
         server.verify();
     }

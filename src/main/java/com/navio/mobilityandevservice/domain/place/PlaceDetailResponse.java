@@ -14,6 +14,8 @@ public record PlaceDetailResponse(
         String description,
         Double rating,
         Long reviewCount,
-        PlaceLocation placeLocation
+        PlaceLocation placeLocation,
+        // Machine-readable provider type, e.g. "subway_station"; category is its display text.
+        String primaryType
 ) {
 }

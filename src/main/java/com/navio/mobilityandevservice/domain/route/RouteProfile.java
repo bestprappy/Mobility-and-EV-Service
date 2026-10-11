@@ -9,7 +9,8 @@ public enum RouteProfile {
     DRIVING_TRAFFIC("driving-traffic"),
     DRIVING("driving"),
     WALKING("walking"),
-    CYCLING("cycling");
+    CYCLING("cycling"),
+    TRANSIT("transit");
 
     private final String value;
 

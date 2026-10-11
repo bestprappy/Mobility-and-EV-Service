@@ -53,6 +53,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             "regularOpeningHours",
             "rating",
             "userRatingCount",
+            "primaryType",
             "primaryTypeDisplayName"
     );
     private static final String SEARCH_FIELD_MASK = String.join(",",
@@ -62,6 +63,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             "places.location",
             "places.rating",
             "places.userRatingCount",
+            "places.primaryType",
             "places.primaryTypeDisplayName"
     );
     private static final String EV_CHARGER_FIELD_MASK = String.join(",",
@@ -270,7 +272,8 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 category,
                 place.rating(),
                 place.userRatingCount(),
-                GooglePlaceLocationMapper.map(place.addressComponents())
+                GooglePlaceLocationMapper.map(place.addressComponents()),
+                place.primaryType()
         );
     }
 
@@ -526,6 +529,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             Double rating,
             Long userRatingCount,
             GoogleText primaryTypeDisplayName,
+            String primaryType,
             String businessStatus,
             GoogleEvChargeOptions evChargeOptions,
             List<GoogleAddressComponent> addressComponents
