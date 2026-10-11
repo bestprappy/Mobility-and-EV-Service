@@ -22,9 +22,15 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 @Component
 public class GoogleRoutesAdapter implements RouteProvider {
+
+    private static final Set<String> RAIL_VEHICLE_TYPES = Set.of(
+            "SUBWAY", "RAIL", "HEAVY_RAIL", "COMMUTER_TRAIN", "HIGH_SPEED_TRAIN",
+            "LONG_DISTANCE_TRAIN", "METRO_RAIL", "MONORAIL", "TRAM"
+    );
 
     private static final String ROUTE_FIELD_MASK = String.join(",",
             "routes.distanceMeters",
@@ -57,6 +63,7 @@ public class GoogleRoutesAdapter implements RouteProvider {
             throw new IllegalArgumentException("At least two route points are required");
         }
         boolean transit = profile == RouteProfile.TRANSIT;
+        boolean railOnly = transit && Boolean.TRUE.equals(points.getLast().railOnly());
         if (transit && points.size() != 2) {
             // Google Routes rejects intermediate waypoints in transit mode.
             throw new IllegalArgumentException("A transit route connects exactly two points");
@@ -70,7 +77,8 @@ public class GoogleRoutesAdapter implements RouteProvider {
                 profile == RouteProfile.DRIVING_TRAFFIC ? "TRAFFIC_AWARE" : null,
                 "HIGH_QUALITY",
                 "ENCODED_POLYLINE",
-                false
+                railOnly,
+                railOnly ? new GoogleTransitPreferences(List.of("RAIL")) : null
         );
 
         try {
@@ -91,7 +99,14 @@ public class GoogleRoutesAdapter implements RouteProvider {
                 throw new ProviderClientException("Google Routes returned no route");
             }
 
-            GoogleRoute route = response.routes().getFirst();
+            // Google treats allowedTravelModes as a preference, not a constraint. Reject bus
+            // rides (including bus transfers) and examine alternatives for a genuine rail route.
+            GoogleRoute route = railOnly
+                    ? response.routes().stream().filter(this::isRailRoute).findFirst().orElse(null)
+                    : response.routes().getFirst();
+            if (route == null) {
+                return new RoutePlan(List.of());
+            }
             List<RouteLeg> legs = safeList(route.legs()).stream()
                     .map(leg -> transit ? mapTransitLeg(leg) : mapLeg(leg))
                     .toList();
@@ -114,6 +129,28 @@ public class GoogleRoutesAdapter implements RouteProvider {
                 leg.distanceMeters() == null ? 0 : leg.distanceMeters(),
                 parseDurationSeconds(leg.duration())
         );
+    }
+
+    private boolean isRailRoute(GoogleRoute route) {
+        List<GoogleRouteLeg> legs = safeList(route.legs());
+        if (legs.size() != 1) {
+            return false;
+        }
+        boolean hasRailRide = false;
+        for (GoogleRouteStep step : safeList(legs.getFirst().steps())) {
+            if ("WALK".equals(step.travelMode())) {
+                continue;
+            }
+            GoogleTransitDetails details = step.transitDetails();
+            GoogleTransitLine line = details == null ? null : details.transitLine();
+            GoogleTransitVehicle vehicle = line == null ? null : line.vehicle();
+            if (!"TRANSIT".equals(step.travelMode()) || vehicle == null
+                    || vehicle.type() == null || !RAIL_VEHICLE_TYPES.contains(vehicle.type())) {
+                return false;
+            }
+            hasRailRide = true;
+        }
+        return hasRailRide;
     }
 
     /**
@@ -247,8 +284,12 @@ public class GoogleRoutesAdapter implements RouteProvider {
             String routingPreference,
             String polylineQuality,
             String polylineEncoding,
-            boolean computeAlternativeRoutes
+            boolean computeAlternativeRoutes,
+            GoogleTransitPreferences transitPreferences
     ) {
+    }
+
+    private record GoogleTransitPreferences(List<String> allowedTravelModes) {
     }
 
     private record GoogleWaypoint(GoogleLocation location) {

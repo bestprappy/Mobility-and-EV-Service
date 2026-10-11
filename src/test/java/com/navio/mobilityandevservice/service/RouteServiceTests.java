@@ -20,6 +20,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
@@ -105,6 +106,36 @@ class RouteServiceTests {
         assertThat(segment.status()).isEqualTo(RouteSegmentStatus.FALLBACK);
         assertThat(segment.travelMode()).isEqualTo(LegTravelMode.TRANSIT);
         assertThat(segment.fallbackReason()).isEqualTo("No public transit route was found");
+    }
+
+    @Test
+    void railRequestsNeverReuseABusCapableTransitCacheEntry() {
+        AtomicInteger providerCalls = new AtomicInteger();
+        RouteService service = service((profile, points) -> {
+            providerCalls.incrementAndGet();
+            if (Boolean.TRUE.equals(points.getLast().railOnly())) {
+                return new RoutePlan(List.of());
+            }
+            return recordingProvider(new CopyOnWriteArrayList<>()).computeRoute(profile, points);
+        });
+        RoutePointRequest origin = point("station-1", 25.04, 121.51, null);
+        RoutePointRequest generalArrival = point("station-2", 25.05, 121.52, LegTravelMode.TRANSIT);
+        RoutePointRequest railArrival = new RoutePointRequest("station-2", "station-2", RoutePointType.PLACE,
+                25.05, 121.52, LegTravelMode.TRANSIT, true);
+
+        assertThat(service.computeDirections(day(origin, generalArrival)).segments().getFirst().status())
+                .isEqualTo(RouteSegmentStatus.ROUTED);
+        var rail = service.computeDirections(day(origin, railArrival)).segments().getFirst();
+
+        assertThat(rail.status()).isEqualTo(RouteSegmentStatus.FALLBACK);
+        assertThat(rail.fallbackReason()).isEqualTo("No rail route was found");
+        assertThat(rail.steps()).isEmpty();
+        assertThat(rail.travelMode()).isEqualTo(LegTravelMode.TRANSIT);
+        assertThat(service.computeDirections(day(origin, generalArrival)).segments().getFirst().status())
+                .isEqualTo(RouteSegmentStatus.ROUTED);
+        assertThat(service.computeDirections(day(origin, railArrival)).segments().getFirst().status())
+                .isEqualTo(RouteSegmentStatus.FALLBACK);
+        assertThat(providerCalls).hasValue(2);
     }
 
     private record ProviderCall(RouteProfile profile, int points) {

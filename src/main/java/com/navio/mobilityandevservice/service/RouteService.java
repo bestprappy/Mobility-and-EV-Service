@@ -35,6 +35,7 @@ public class RouteService {
     private static final String CIRCUIT_BREAKER_NAME = "googleRoutes";
     private static final String FALLBACK_REASON = "Road route is temporarily unavailable";
     private static final String TRANSIT_FALLBACK_REASON = "No public transit route was found";
+    private static final String RAIL_FALLBACK_REASON = "No rail route was found";
     private static final String WALK_FALLBACK_REASON = "Walking route is unavailable";
     private static final double EARTH_RADIUS_METERS = 6_371_000;
 
@@ -212,7 +213,8 @@ public class RouteService {
                 null,
                 switch (mode) {
                     case DRIVE -> FALLBACK_REASON;
-                    case TRANSIT -> TRANSIT_FALLBACK_REASON;
+                    case TRANSIT -> Boolean.TRUE.equals(to.railOnly())
+                            ? RAIL_FALLBACK_REASON : TRANSIT_FALLBACK_REASON;
                     case WALK -> WALK_FALLBACK_REASON;
                 },
                 mode,
@@ -222,6 +224,9 @@ public class RouteService {
 
     private String routeCacheKey(RouteProfile profile, List<RoutePointRequest> points) {
         StringBuilder key = new StringBuilder(profile.value());
+        if (profile == RouteProfile.TRANSIT && Boolean.TRUE.equals(points.getLast().railOnly())) {
+            key.append(":rail-only");
+        }
         for (RoutePointRequest point : points) {
             key.append(':')
                     .append(coordinateKey(point.lat()))

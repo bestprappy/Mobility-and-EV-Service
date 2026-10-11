@@ -6,6 +6,8 @@ import com.navio.mobilityandevservice.domain.route.RoutePointType;
 import com.navio.mobilityandevservice.domain.route.RouteProfile;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -76,6 +78,111 @@ class GoogleRoutesAdapterTests {
             new RoutePointRequest("a", "Airport Terminal 2", RoutePointType.PLACE, 25.077, 121.232),
             new RoutePointRequest("b", "Taipei Main Station", RoutePointType.PLACE, 25.046, 121.517)
     );
+
+    private static final List<RoutePointRequest> RAIL_STATIONS = List.of(
+            TWO_STATIONS.getFirst(),
+            new RoutePointRequest("b", "Taipei Main Station", RoutePointType.PLACE,
+                    25.046, 121.517, LegTravelMode.TRANSIT, true)
+    );
+
+    @Test
+    void requestsRailAlternativesAndSelectsThePurpleMrtInsteadOfTheFirstBusRoute() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.travelMode").value("TRANSIT"))
+                .andExpect(jsonPath("$.computeAlternativeRoutes").value(true))
+                .andExpect(jsonPath("$.transitPreferences.allowedTravelModes[0]").value("RAIL"))
+                .andExpect(jsonPath("$.intermediates").doesNotExist())
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("BUS")) + ","
+                        + transitRoute(ride("SUBWAY")) + "]}", MediaType.APPLICATION_JSON));
+
+        var leg = adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS).legs().getFirst();
+
+        assertThat(leg.steps()).hasSize(1);
+        assertThat(leg.steps().getFirst().line().vehicleType()).isEqualTo("SUBWAY");
+        assertThat(leg.steps().getFirst().line().color()).isEqualTo("#8246af");
+        assertThat(leg.coordinates()).hasSize(3);
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BUS", "INTERCITY_BUS", "TROLLEYBUS", "SHARE_TAXI", "FERRY", "OTHER"})
+    void rejectsNonRailRidesEvenWhenTheyAreOnlyOneTransferInAnOtherwiseRailRoute(String vehicleType) {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("SUBWAY") + "," + ride(vehicleType))
+                        + "]}", MediaType.APPLICATION_JSON));
+
+        assertThat(adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS).legs()).isEmpty();
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SUBWAY", "RAIL", "HEAVY_RAIL", "COMMUTER_TRAIN", "HIGH_SPEED_TRAIN",
+            "LONG_DISTANCE_TRAIN", "METRO_RAIL", "MONORAIL", "TRAM"})
+    void acceptsRailTransfersAndStationAccessWalking(String vehicleType) {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute("""
+                        {"travelMode":"WALK","staticDuration":"30s"},
+                        """ + ride(vehicleType) + "," + ride("SUBWAY")) + "]}", MediaType.APPLICATION_JSON));
+
+        var leg = adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS).legs().getFirst();
+
+        assertThat(leg.steps()).hasSize(3);
+        assertThat(leg.durationSeconds()).isEqualTo(150);
+        server.verify();
+    }
+
+    @Test
+    void rejectsWalkingOnlyRoutesAndUnidentifiedTransitVehicles() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute("{\"travelMode\":\"WALK\"}") + ","
+                        + transitRoute("{\"travelMode\":\"TRANSIT\",\"transitDetails\":{}}") + ","
+                        + transitRoute("") + "]}", MediaType.APPLICATION_JSON));
+
+        assertThat(adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS).legs()).isEmpty();
+        server.verify();
+    }
+
+    @Test
+    void keepsBusesAvailableForGeneralPublicTransit() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.computeAlternativeRoutes").value(false))
+                .andExpect(jsonPath("$.transitPreferences").doesNotExist())
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("BUS")) + "]}", MediaType.APPLICATION_JSON));
+
+        var leg = adapter.computeRoute(RouteProfile.TRANSIT, TWO_STATIONS).legs().getFirst();
+
+        assertThat(leg.steps().getFirst().line().vehicleType()).isEqualTo("BUS");
+        server.verify();
+    }
+
+    @Test
+    void ignoresTheRailRestrictionWhenTheTravellerDrivesInstead() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.travelMode").value("DRIVE"))
+                .andExpect(jsonPath("$.computeAlternativeRoutes").value(false))
+                .andExpect(jsonPath("$.transitPreferences").doesNotExist())
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute("") + "]}", MediaType.APPLICATION_JSON));
+
+        assertThat(adapter.computeRoute(RouteProfile.DRIVING, RAIL_STATIONS).legs()).hasSize(1);
+        server.verify();
+    }
+
+    private static String transitRoute(String steps) {
+        return """
+                {"legs":[{"distanceMeters":40100,"duration":"21600s",
+                  "polyline":{"encodedPolyline":"_p~iF~ps|U_ulLnnqC_mqNvxq`@"},
+                  "steps":[%s]}]}
+                """.formatted(steps);
+    }
+
+    private static String ride(String vehicleType) {
+        return """
+                {"travelMode":"TRANSIT","staticDuration":"60s",
+                 "polyline":{"encodedPolyline":"_p~iF~ps|U_ulLnnqC_mqNvxq`@"},
+                 "transitDetails":{"transitLine":{"name":"Taoyuan Airport MRT","color":"#8246AF",
+                   "vehicle":{"type":"%s"}}}}
+                """.formatted(vehicleType);
+    }
 
     @Test
     void mapsATransitLegToColouredRidesAndOneMergedWalkTimedWithoutTheInitialWait() {
