@@ -17,8 +17,13 @@ public record EvRouteOptimizationRequest(
         @NotNull @DecimalMin("1.0") @DecimalMax("40.0") Double reserveSocPct,
         @NotNull @DecimalMin("20.0") @DecimalMax("95.0") Double targetSocPct,
         @NotNull @DecimalMin("1.0") @DecimalMax("50.0") Double maximumDetourKm,
-        @Size(max = 366) List<@Valid Day> precedingDays
+        @Size(max = 366) List<@Valid Day> precedingDays,
+        @Size(max = 366) List<@Valid Day> followingDays
 ) {
+    public EvRouteOptimizationRequest(String blockId, List<EvRouteStopRequest> stops, EvVehicleSpec vehicle,
+            Double startingSocPct, Double reserveSocPct, Double targetSocPct, Double maximumDetourKm, List<Day> precedingDays) {
+        this(blockId, stops, vehicle, startingSocPct, reserveSocPct, targetSocPct, maximumDetourKm, precedingDays, List.of());
+    }
     public EvRouteOptimizationRequest(String blockId, List<EvRouteStopRequest> stops, EvVehicleSpec vehicle,
             Double startingSocPct, Double reserveSocPct, Double targetSocPct, Double maximumDetourKm) {
         this(blockId, stops, vehicle, startingSocPct, reserveSocPct, targetSocPct, maximumDetourKm, List.of());
@@ -26,6 +31,7 @@ public record EvRouteOptimizationRequest(
     public EvRouteOptimizationRequest {
         stops = stops == null ? null : List.copyOf(stops);
         precedingDays = precedingDays == null ? List.of() : List.copyOf(precedingDays);
+        followingDays = followingDays == null ? List.of() : List.copyOf(followingDays);
     }
 
     public record Day(@NotBlank @Size(max = 160) String blockId,

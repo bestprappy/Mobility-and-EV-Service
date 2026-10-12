@@ -254,17 +254,27 @@ public class SocConstrainedRouteOptimizer {
     }
 
     static Double chargeMinutes(double arrivalSocPct, double targetSocPct, EvChargerResponse charger, EvVehicleSpec vehicle) {
-        var connectors = charger.connectorTypes().stream().filter(vehicle.connectorTypes()::contains).toList();
-        Double limit = connectors.stream().map(c -> DC_CONNECTORS.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
-                .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);
-        Double power = limit != null && charger.maxKw() > 0 ? Math.min(charger.maxKw(), limit) : null;
+        if (targetSocPct <= arrivalSocPct) return 0.0;
+        if (!compatible(charger, vehicle)) return null;
+        Double power = effectivePowerKw(charger, vehicle);
         var model = vehicle.resolvedModel();
         return CanonicalEnergy.calculate(new CanonicalEnergy.Input(model, 0.0, "ROUTED", arrivalSocPct, arrivalSocPct,
-                new CanonicalEnergy.Charging(targetSocPct, null, !connectors.isEmpty(), power), 12.0)).nominalChargeMinutes();
+                new CanonicalEnergy.Charging(targetSocPct, null, true, power), 12.0)).nominalChargeMinutes();
     }
 
-    private boolean compatible(EvChargerResponse charger, EvVehicleSpec vehicle) {
-        return charger.connectorTypes().stream().anyMatch(vehicle.connectorTypes()::contains);
+    static Double effectivePowerKw(EvChargerResponse charger, EvVehicleSpec vehicle) {
+        if (!compatible(charger, vehicle)) return null;
+        var connectors = charger.connectorTypes().stream().filter(c -> c != EvConnectorType.OTHER)
+                .filter(vehicle.connectorTypes()::contains).toList();
+        Double limit = connectors.stream().map(c -> DC_CONNECTORS.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
+                .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);
+        return limit != null && CanonicalEnergy.positive(charger.maxKw()) ? Math.min(charger.maxKw(), limit) : null;
+    }
+
+    static boolean compatible(EvChargerResponse charger, EvVehicleSpec vehicle) {
+        return charger.status() == com.navio.mobilityandevservice.domain.ev.EvChargerStatus.ACTIVE
+                && charger.connectorTypes().stream().filter(c -> c != EvConnectorType.OTHER)
+                .anyMatch(vehicle.connectorTypes()::contains);
     }
 
     private double riskPenaltySeconds(EvChargerResponse charger) {

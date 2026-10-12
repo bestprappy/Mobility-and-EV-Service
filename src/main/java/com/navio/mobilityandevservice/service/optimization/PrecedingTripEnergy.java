@@ -22,6 +22,7 @@ final class PrecedingTripEnergy {
         Double forward = request.startingSocPct();
         EvRouteStopRequest previous = null;
         boolean uncertainOrInfeasible = false;
+        boolean belowReserve = false;
         for (var day : request.precedingDays()) {
             List<RouteSegmentResponse> segments = day.stops().size() < 2 ? List.of()
                     : routes.computeDirections(new DirectionsRequest(RouteProfile.DRIVING_TRAFFIC,
@@ -43,7 +44,9 @@ final class PrecedingTripEnergy {
                         km, km == null ? "UNAVAILABLE" : "ROUTED", forward, stop.observedSocPct(),
                         charging(stop, request.vehicle()), request.reserveSocPct()));
                 // An observation may restore onward state, but cannot certify an unreachable or unknown earlier leg.
-                uncertainOrInfeasible |= !"FEASIBLE".equals(result.predictedLegFeasibility());
+                uncertainOrInfeasible |= !"FEASIBLE".equals(result.predictedLegFeasibility()) || result.departureSocPct() == null;
+                // Starting SoC is not an arrival. Check every actual prior driving leg before observations.
+                belowReserve |= i > 0 && "BELOW_RESERVE".equals(result.predictedArrivalReserveStatus());
                 forward = result.departureSocPct();
                 previous = stop;
             }
@@ -54,6 +57,7 @@ final class PrecedingTripEnergy {
         if (uncertainOrInfeasible || forward == null) {
             return new State(null, "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.");
         }
+        if (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct())) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.");
         return new State(forward, null);
     }
 
@@ -73,10 +77,11 @@ final class PrecedingTripEnergy {
         Boolean compatible = !matching.isEmpty() ? Boolean.TRUE
                 : station.connectorTypes().contains(EvConnectorType.OTHER) || vehicle.connectorTypes().contains(EvConnectorType.OTHER)
                 ? null : Boolean.FALSE;
+        if (station.status() != com.navio.mobilityandevservice.domain.ev.EvChargerStatus.ACTIVE) compatible = null;
         Double limit = matching.stream().map(c -> DC.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
                 .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);
         Double power = limit != null && station.maxKw() > 0 ? Math.min(limit, station.maxKw()) : null;
-        return new CanonicalEnergy.Charging(stop.targetBatteryPct() == null ? null : stop.targetBatteryPct().doubleValue(),
-                stop.estimatedChargeMinutes() == null ? null : stop.estimatedChargeMinutes().doubleValue(), compatible, power);
+        return new CanonicalEnergy.Charging(stop.effectiveTargetSocPct(),
+                stop.effectiveChargeMinutes(), compatible, power);
     }
 }
