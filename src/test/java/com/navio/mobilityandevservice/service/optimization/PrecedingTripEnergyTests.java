@@ -67,8 +67,15 @@ class PrecedingTripEnergyTests {
         verifyNoInteractions(routes);
     }
 
+    @Test void anObservationCannotHideAPriorReserveViolation() {
+        var base=request(List.of(new EvRouteOptimizationRequest.Day("day-1",List.of(stop("a",100,null),stop("b",102,80.0)))));
+        var low=new EvRouteOptimizationRequest(base.blockId(),base.stops(),vehicle,15.0,12.0,70.0,20.0,base.precedingDays());
+        assertThat(PrecedingTripEnergy.resolve(low,routes(25000,RouteSegmentStatus.ROUTED)).failure()).contains("reserve");
+    }
+
     private EvRouteOptimizationRequest withCharge(EvConnectorType connector, Integer target, Integer minutes) {
         var station = mock(EvChargerResponse.class);
+        when(station.status()).thenReturn(com.navio.mobilityandevservice.domain.ev.EvChargerStatus.ACTIVE);
         when(station.connectorTypes()).thenReturn(List.of(connector));
         when(station.maxKw()).thenReturn(50.0);
         var charge = new EvRouteStopRequest("charge", "charge", 13, 101, station, false, null, target, 60.0, minutes);

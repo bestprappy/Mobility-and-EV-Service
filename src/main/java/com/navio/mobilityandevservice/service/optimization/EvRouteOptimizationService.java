@@ -55,8 +55,25 @@ public class EvRouteOptimizationService {
             stops.set(0, protectEndpoint(stops.getFirst()));
             stops.set(stops.size() - 1, protectEndpoint(stops.getLast()));
         }
-        return optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
+        var result = optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
                 preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()));
+        if (result.feasible() && !request.followingDays().isEmpty()) {
+            var last = request.stops().getLast();
+            // Carry only the selected day's final state/position; do not charge or observe its last stop twice.
+            var boundary = new EvRouteStopRequest(last.itemId(), last.name(), last.lat(), last.lng(), null, false, null);
+            var replay = new ArrayList<EvRouteOptimizationRequest.Day>();
+            replay.add(new EvRouteOptimizationRequest.Day(request.blockId(), List.of(boundary)));
+            replay.addAll(request.followingDays());
+            var end = replay.stream().filter(day -> !day.stops().isEmpty()).reduce((a, b) -> b).orElseThrow().stops().getLast();
+            var onward = PrecedingTripEnergy.resolve(new EvRouteOptimizationRequest(request.blockId(), List.of(end), request.vehicle(),
+                    result.finalSocPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), replay), routeService);
+            if (onward.failure() != null) {
+                String message = "The proposed plan leaves a later day unavailable, disconnected or below reserve. Review the later itinerary before applying.";
+                return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), result.finalSocPct(),
+                        result.totalDrivingSeconds(), result.totalChargingMinutes(), message, List.of(message, onward.failure()));
+            }
+        }
+        return result;
     }
 
     private EvRouteStopRequest protectEndpoint(EvRouteStopRequest stop) {
@@ -64,7 +81,7 @@ public class EvRouteOptimizationService {
         // The actual day boundary cannot move when an unlocked charger is replaced.
         // This is request-local protection, not a change to the saved user's lock setting.
         return new EvRouteStopRequest(stop.itemId(), stop.name(), stop.lat(), stop.lng(), stop.charger(),
-                true, stop.selectionSource(), stop.targetBatteryPct(), stop.observedSocPct(), stop.estimatedChargeMinutes());
+                true, stop.selectionSource(), stop.targetBatteryPct(), stop.observedSocPct(), stop.estimatedChargeMinutes(), stop.chargingDurationMinutes(), stop.plannedDepartureSocPct());
     }
 
     private EvRouteOptimizationResponse optimizeDay(EvRouteOptimizationRequest request) {

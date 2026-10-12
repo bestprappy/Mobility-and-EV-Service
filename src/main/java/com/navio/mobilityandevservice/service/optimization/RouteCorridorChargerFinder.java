@@ -192,7 +192,7 @@ public class RouteCorridorChargerFinder {
     private boolean isUsable(EvChargerResponse charger, EvRouteOptimizationRequest request) {
         return charger.status() == EvChargerStatus.ACTIVE
                 && charger.maxKw() > 0
-                && charger.connectorTypes().stream().anyMatch(request.vehicle().connectorTypes()::contains);
+                && SocConstrainedRouteOptimizer.compatible(charger, request.vehicle());
     }
 
     private boolean withinCorridor(

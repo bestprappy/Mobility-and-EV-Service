@@ -33,6 +33,39 @@ import static org.mockito.Mockito.when;
 class EvRouteOptimizationServiceTests {
 
     @Test
+    void followingDaysAreReplayedAndUnsafePlansHaveNoApplicableOperations() {
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        when(finder.populateCandidates(any(), any(), any())).thenAnswer(call -> call.getArgument(0));
+        when(routes.computeDirections(any())).thenAnswer(call -> {
+            DirectionsRequest request = call.getArgument(0);
+            var group = request.groups().getFirst();
+            var legs = new ArrayList<RouteSegmentResponse>();
+            for (int i = 1; i < group.points().size(); i++) {
+                var from = group.points().get(i - 1); var to = group.points().get(i);
+                long meters = to.id().equals("far") ? 300_000 : 30_000;
+                legs.add(new RouteSegmentResponse("leg-" + i, group.blockId(), from.id(), to.id(), from.name(), to.name(),
+                        RouteSegmentStatus.ROUTED, null, meters, 1800L, null));
+            }
+            return new DirectionsResponse(legs);
+        });
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var service = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer());
+        for (String id : List.of("near", "far", "observed-low", "disconnected")) {
+            var start = new EvRouteStopRequest("next-start", "Next start", 13,
+                    id.equals("disconnected") ? 105 : 103, null, false, null);
+            var end = new EvRouteStopRequest(id, id, 13, 104, null, false, null, null,
+                    id.equals("observed-low") ? 5.0 : null);
+            var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                    base.startingSocPct(), base.reserveSocPct(), base.targetSocPct(), base.maximumDetourKm(), List.of(),
+                    List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(start, end))));
+            var result = service.optimize(request);
+            assertThat(result.feasible()).as(id).isEqualTo(id.equals("near"));
+            if (!result.feasible()) assertThat(result.operations()).isEmpty();
+        }
+    }
+
+    @Test
     void protectsChargerDayBoundariesWithoutMutatingSavedLockSettings() {
         var routes = mock(RouteService.class);
         var finder = mock(RouteCorridorChargerFinder.class);

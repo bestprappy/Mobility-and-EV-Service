@@ -20,7 +20,7 @@ public class EvRouteOptimizationController {
     }
 
     // Separate route makes an older mobility deployment fail closed instead of ignoring trip context.
-    @PostMapping({"/optimize", "/optimize-canonical"})
+    @PostMapping({"/optimize", "/optimize-canonical", "/optimize-canonical-v2"})
     EvRouteOptimizationResponse optimize(@Valid @RequestBody EvRouteOptimizationRequest request) {
         return optimizationService.optimize(request);
     }
