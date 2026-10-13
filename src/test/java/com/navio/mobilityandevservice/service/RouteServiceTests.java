@@ -18,6 +18,9 @@ import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import com.navio.mobilityandevservice.provider.RouteQueryOptions;
+import com.navio.mobilityandevservice.exception.InvalidRequestException;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -26,6 +29,7 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -33,6 +37,40 @@ import static org.mockito.Mockito.when;
 class RouteServiceTests {
 
     private static final RoutePointRequest HOTEL = point("hotel", 25.03, 121.50, null);
+
+    @Test
+    void separatesScheduledAlternativeQueriesFromDefaultRoutesAndDifferentDepartureTimes() {
+        List<RouteQueryOptions> optionsSeen = new CopyOnWriteArrayList<>();
+        RouteProvider provider = new RouteProvider() {
+            @Override public RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points) {
+                return computeRoute(profile, points, RouteQueryOptions.DEFAULT);
+            }
+            @Override public RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points, RouteQueryOptions options) {
+                optionsSeen.add(options);
+                return recordingProvider(new CopyOnWriteArrayList<>()).computeRoute(profile, points);
+            }
+        };
+        RouteService service = service(provider);
+        var groups = day(HOTEL, point("station", 25.05, 121.52, LegTravelMode.TRANSIT)).groups();
+        Instant first = Instant.now().plusSeconds(3600);
+        var scheduled = new DirectionsRequest(null, groups, true, first);
+        service.computeDirections(scheduled);
+        service.computeDirections(scheduled);
+        service.computeDirections(new DirectionsRequest(null, groups, true, first.plusSeconds(60)));
+        service.computeDirections(new DirectionsRequest(null, groups));
+        assertThat(optionsSeen).containsExactly(new RouteQueryOptions(true, first),
+                new RouteQueryOptions(true, first.plusSeconds(60)), RouteQueryOptions.DEFAULT);
+    }
+
+    @Test
+    void rejectsOutOfWindowDepartureBeforeCallingTheProvider() {
+        RouteProvider provider = mock(RouteProvider.class);
+        RouteService service = service(provider);
+        var groups = day(HOTEL, point("station", 25.05, 121.52, LegTravelMode.TRANSIT)).groups();
+        assertThatThrownBy(() -> service.computeDirections(new DirectionsRequest(null, groups, true,
+                Instant.now().plus(Duration.ofDays(101))))).isInstanceOf(InvalidRequestException.class);
+        org.mockito.Mockito.verifyNoInteractions(provider);
+    }
 
     @Test
     void returnsDirectLineFallbackWhenProviderAndStaleCacheAreUnavailable() {
@@ -96,6 +134,29 @@ class RouteServiceTests {
     }
 
     @Test
+    void routesBicycleLegsWithTheCyclingProfileAndKeepsTheirMode() {
+        List<ProviderCall> calls = new CopyOnWriteArrayList<>();
+        RouteService service = service(recordingProvider(calls));
+        var response = service.computeDirections(day(HOTEL,
+                point("park", 25.04, 121.51, LegTravelMode.BIKE),
+                point("museum", 25.05, 121.52, LegTravelMode.BIKE)));
+        assertThat(calls).containsExactly(new ProviderCall(RouteProfile.CYCLING, 3));
+        assertThat(response.segments()).extracting(segment -> segment.travelMode())
+                .containsExactly(LegTravelMode.BIKE, LegTravelMode.BIKE);
+    }
+
+    @Test
+    void describesAnUnverifiedBicycleConnectionWithoutClaimingARoadRoute() {
+        RouteService service = service((profile, points) -> new RoutePlan(List.of()));
+        var segment = service.computeDirections(day(HOTEL,
+                point("park", 25.04, 121.51, LegTravelMode.BIKE))).segments().getFirst();
+        assertThat(segment.travelMode()).isEqualTo(LegTravelMode.BIKE);
+        assertThat(segment.status()).isEqualTo(RouteSegmentStatus.FALLBACK);
+        assertThat(segment.durationSeconds()).isNull();
+        assertThat(segment.fallbackReason()).isEqualTo("Cycling route is unavailable");
+    }
+
+    @Test
     void explainsAMissingTransitRouteInsteadOfBlamingTheRoad() {
         RouteService service = service((profile, points) -> new RoutePlan(List.of()));
 
@@ -136,6 +197,45 @@ class RouteServiceTests {
         assertThat(service.computeDirections(day(origin, railArrival)).segments().getFirst().status())
                 .isEqualTo(RouteSegmentStatus.FALLBACK);
         assertThat(providerCalls).hasValue(2);
+    }
+
+    @Test
+    void railBusAndGeneralTransitUseSeparateCacheEntriesForTheSameAirportHotelLeg() {
+        List<LegTravelMode> requested = new CopyOnWriteArrayList<>();
+        RouteService service = service((profile, points) -> {
+            requested.add(points.getLast().arrivalMode());
+            assertThat(profile).isEqualTo(RouteProfile.TRANSIT);
+            return recordingProvider(new CopyOnWriteArrayList<>()).computeRoute(profile, points);
+        });
+        for (LegTravelMode mode : List.of(LegTravelMode.TRANSIT, LegTravelMode.RAIL, LegTravelMode.BUS)) {
+            var request = day(HOTEL, point("airport", 25.077, 121.232, mode));
+            assertThat(service.computeDirections(request).segments().getFirst().travelMode()).isEqualTo(mode);
+            service.computeDirections(request);
+        }
+        assertThat(requested).containsExactly(LegTravelMode.TRANSIT, LegTravelMode.RAIL, LegTravelMode.BUS);
+    }
+
+    @Test
+    void preferredTransitRunsCannotContainIntermediateWaypoints() {
+        List<ProviderCall> calls = new CopyOnWriteArrayList<>();
+        var response = service(recordingProvider(calls)).computeDirections(day(HOTEL,
+                point("a", 25.04, 121.51, LegTravelMode.RAIL), point("b", 25.05, 121.52, LegTravelMode.RAIL),
+                point("c", 25.06, 121.53, LegTravelMode.BUS), point("d", 25.07, 121.54, LegTravelMode.BUS)));
+        assertThat(calls).hasSize(4).allMatch(call -> call.profile() == RouteProfile.TRANSIT && call.points() == 2);
+        assertThat(response.segments()).extracting(segment -> segment.travelMode())
+                .containsExactly(LegTravelMode.RAIL, LegTravelMode.RAIL, LegTravelMode.BUS, LegTravelMode.BUS);
+    }
+
+    @Test
+    void missingPreferredTransitKeepsItsModeAndExplainsItsUnavailableConnection() {
+        RouteService service = service((profile, points) -> new RoutePlan(List.of()));
+        for (LegTravelMode mode : List.of(LegTravelMode.RAIL, LegTravelMode.BUS)) {
+            var segment = service.computeDirections(day(HOTEL, point("airport", 25.077, 121.232, mode))).segments().getFirst();
+            assertThat(segment.status()).isEqualTo(RouteSegmentStatus.FALLBACK);
+            assertThat(segment.travelMode()).isEqualTo(mode);
+            assertThat(segment.fallbackReason()).isEqualTo(mode == LegTravelMode.RAIL ? "No rail route was found" : "No bus route was found");
+            assertThat(segment.journeys()).isEmpty();
+        }
     }
 
     private record ProviderCall(RouteProfile profile, int points) {

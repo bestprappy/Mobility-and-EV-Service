@@ -8,4 +8,8 @@ import java.util.List;
 public interface RouteProvider {
 
     RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points);
+
+    default RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points, RouteQueryOptions options) {
+        return computeRoute(profile, points);
+    }
 }

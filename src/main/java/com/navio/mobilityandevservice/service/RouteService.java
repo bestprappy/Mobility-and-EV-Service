@@ -14,6 +14,9 @@ import com.navio.mobilityandevservice.domain.route.RouteSegmentStatus;
 import com.navio.mobilityandevservice.provider.RouteLeg;
 import com.navio.mobilityandevservice.provider.RoutePlan;
 import com.navio.mobilityandevservice.provider.RouteProvider;
+import com.navio.mobilityandevservice.provider.RouteQueryOptions;
+import com.navio.mobilityandevservice.domain.route.TransitJourneyResponse;
+import com.navio.mobilityandevservice.exception.InvalidRequestException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
@@ -24,6 +27,8 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,12 +59,20 @@ public class RouteService {
     }
 
     public DirectionsResponse computeDirections(DirectionsRequest request) {
+        if (request.departureTime() != null) {
+            Instant now = Instant.now();
+            if (request.departureTime().isBefore(now.minus(7, ChronoUnit.DAYS))
+                    || request.departureTime().isAfter(now.plus(100, ChronoUnit.DAYS))) {
+                throw new InvalidRequestException("Transit departure must be within the past 7 days or next 100 days");
+            }
+        }
         RouteProfile drivingProfile = request.effectiveProfile();
         List<RouteSegmentResponse> segments = new ArrayList<>();
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             List<List<Future<List<RouteSegmentResponse>>>> groupTasks = request.groups().stream()
-                    .map(group -> submitRuns(executor, group, drivingProfile))
+                    .map(group -> submitRuns(executor, group, drivingProfile, new RouteQueryOptions(
+                            Boolean.TRUE.equals(request.includeTransitAlternatives()), request.departureTime(), request.transitRoutingPreference())))
                     .toList();
 
             for (List<Future<List<RouteSegmentResponse>>> runTasks : groupTasks) {
@@ -81,12 +94,14 @@ public class RouteService {
     private List<Future<List<RouteSegmentResponse>>> submitRuns(
             ExecutorService executor,
             RoutePointGroupRequest group,
-            RouteProfile drivingProfile
+            RouteProfile drivingProfile,
+            RouteQueryOptions options
     ) {
         return legRuns(group.points()).stream()
                 .map(run -> executor.submit(() -> {
                     RouteProfile profile = providerProfile(run.mode(), drivingProfile);
-                    RoutePlan routePlan = resolveRoutePlan(profile, run.points());
+                    RoutePlan routePlan = resolveRoutePlan(profile, run.points(),
+                            run.mode().isTransit() ? options : RouteQueryOptions.DEFAULT);
                     return toSegments(group.blockId(), run, routePlan);
                 }))
                 .toList();
@@ -103,7 +118,7 @@ public class RouteService {
         for (int index = 1; index < points.size(); index++) {
             LegTravelMode mode = legMode(points.get(index));
             boolean lastLeg = index == points.size() - 1;
-            boolean breaksHere = mode == LegTravelMode.TRANSIT
+            boolean breaksHere = mode.isTransit()
                     || lastLeg
                     || legMode(points.get(index + 1)) != mode;
             if (breaksHere) {
@@ -121,7 +136,8 @@ public class RouteService {
     private static RouteProfile providerProfile(LegTravelMode mode, RouteProfile drivingProfile) {
         return switch (mode) {
             case DRIVE -> drivingProfile;
-            case TRANSIT -> RouteProfile.TRANSIT;
+            case TRANSIT, RAIL, BUS -> RouteProfile.TRANSIT;
+            case BIKE -> RouteProfile.CYCLING;
             case WALK -> RouteProfile.WALKING;
         };
     }
@@ -129,16 +145,24 @@ public class RouteService {
     record LegRun(LegTravelMode mode, List<RoutePointRequest> points) {
     }
 
-    private RoutePlan resolveRoutePlan(RouteProfile profile, List<RoutePointRequest> points) {
+    private RoutePlan resolveRoutePlan(RouteProfile profile, List<RoutePointRequest> points, RouteQueryOptions options) {
         String cacheKey = routeCacheKey(profile, points);
+        if (options.includeTransitAlternatives() || options.departureTime() != null) {
+            Instant departure = options.departureTime() == null ? Instant.now().truncatedTo(ChronoUnit.MINUTES) : options.departureTime();
+            cacheKey += ":journeys:" + options.includeTransitAlternatives() + ":" + departure;
+        }
 
-        return routePlanCache.getFresh(cacheKey).orElseGet(() -> circuitBreaker.run(
+        if (options.transitRoutingPreference() != null) cacheKey += ":preference:" + options.transitRoutingPreference();
+        String resolvedCacheKey = cacheKey;
+        return routePlanCache.getFresh(resolvedCacheKey).orElseGet(() -> circuitBreaker.run(
                 () -> {
-                    RoutePlan routePlan = routeProvider.computeRoute(profile, points);
-                    routePlanCache.put(cacheKey, routePlan);
+                    RoutePlan routePlan = options.equals(RouteQueryOptions.DEFAULT)
+                            ? routeProvider.computeRoute(profile, points)
+                            : routeProvider.computeRoute(profile, points, options);
+                    routePlanCache.put(resolvedCacheKey, routePlan);
                     return routePlan;
                 },
-                throwable -> routePlanCache.getStale(cacheKey).orElse(null)
+                throwable -> routePlanCache.getStale(resolvedCacheKey).orElse(null)
         ));
     }
 
@@ -160,7 +184,8 @@ public class RouteService {
             if (leg == null || leg.coordinates().size() < 2) {
                 segments.add(fallbackSegment(blockId, run.mode(), from, to));
             } else {
-                segments.add(routedSegment(blockId, run.mode(), from, to, leg));
+                segments.add(routedSegment(blockId, run.mode(), from, to, leg,
+                        run.mode().isTransit() ? routePlan.journeys() : List.of()));
             }
         }
 
@@ -172,7 +197,8 @@ public class RouteService {
             LegTravelMode mode,
             RoutePointRequest from,
             RoutePointRequest to,
-            RouteLeg leg
+            RouteLeg leg,
+            List<TransitJourneyResponse> journeys
     ) {
         return new RouteSegmentResponse(
                 segmentId(blockId, from.id(), to.id()),
@@ -187,7 +213,8 @@ public class RouteService {
                 leg.durationSeconds(),
                 null,
                 mode,
-                leg.steps()
+                leg.steps(),
+                journeys
         );
     }
 
@@ -215,7 +242,10 @@ public class RouteService {
                     case DRIVE -> FALLBACK_REASON;
                     case TRANSIT -> Boolean.TRUE.equals(to.railOnly())
                             ? RAIL_FALLBACK_REASON : TRANSIT_FALLBACK_REASON;
+                    case RAIL -> RAIL_FALLBACK_REASON;
+                    case BUS -> "No bus route was found";
                     case WALK -> WALK_FALLBACK_REASON;
+                    case BIKE -> "Cycling route is unavailable";
                 },
                 mode,
                 List.of()
@@ -224,8 +254,10 @@ public class RouteService {
 
     private String routeCacheKey(RouteProfile profile, List<RoutePointRequest> points) {
         StringBuilder key = new StringBuilder(profile.value());
-        if (profile == RouteProfile.TRANSIT && Boolean.TRUE.equals(points.getLast().railOnly())) {
+        if (profile == RouteProfile.TRANSIT && (points.getLast().arrivalMode() == LegTravelMode.RAIL || (points.getLast().arrivalMode() != LegTravelMode.BUS && Boolean.TRUE.equals(points.getLast().railOnly())))) {
             key.append(":rail-only");
+        } else if (profile == RouteProfile.TRANSIT && points.getLast().arrivalMode() == LegTravelMode.BUS) {
+            key.append(":bus-only");
         }
         for (RoutePointRequest point : points) {
             key.append(':')

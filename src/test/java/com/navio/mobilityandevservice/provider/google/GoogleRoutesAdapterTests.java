@@ -14,6 +14,8 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.util.List;
+import java.time.Instant;
+import com.navio.mobilityandevservice.provider.RouteQueryOptions;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -35,6 +37,127 @@ class GoogleRoutesAdapterTests {
                 .defaultHeader("X-Goog-Api-Key", "test-key");
         server = MockRestServiceServer.bindTo(builder).build();
         adapter = new GoogleRoutesAdapter(builder.build());
+    }
+
+    @Test
+    void returnsAlternativeJourneysWithSchedulesFareWalkingAndExactStopCoordinates() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.computeAlternativeRoutes").value(true))
+                .andExpect(jsonPath("$.departureTime").value("2026-10-13T20:00:00Z"))
+                .andExpect(header("X-Goog-FieldMask", org.hamcrest.Matchers.containsString("routes.travelAdvisory.transitFare")))
+                .andRespond(withSuccess("{\"routes\":[" + scheduledRoute("SUBWAY", "360") + ","
+                        + scheduledRoute("BUS", "420") + "]}", MediaType.APPLICATION_JSON));
+        var plan = adapter.computeRoute(RouteProfile.TRANSIT, TWO_STATIONS,
+                new RouteQueryOptions(true, Instant.parse("2026-10-13T20:00:00Z")));
+        assertThat(plan.journeys()).hasSize(2);
+        var first = plan.journeys().getFirst();
+        assertThat(first.departureTime()).isEqualTo(Instant.parse("2026-10-13T20:03:00Z"));
+        assertThat(first.arrivalTime()).isEqualTo(Instant.parse("2026-10-13T20:31:00Z"));
+        assertThat(first.durationSeconds()).isEqualTo(1680);
+        assertThat(first.walkingSeconds()).isEqualTo(300);
+        assertThat(first.fare()).isEqualByComparingTo("360");
+        assertThat(first.currency()).isEqualTo("JPY");
+        assertThat(first.timeZone()).isEqualTo("Asia/Tokyo");
+        assertThat(first.steps().get(1).departureLocation().lng()).isEqualTo(139.74);
+        assertThat(first.steps().get(1).headsign()).isEqualTo("Central");
+        assertThat(first.geometry().coordinates()).hasSize(3);
+        // The existing itinerary contract still measures movement; scheduled rows include waiting.
+        assertThat(plan.legs().getFirst().durationSeconds()).isEqualTo(1320);
+        server.verify();
+    }
+
+    @Test
+    void railAlternativesNeverContainABusCandidate() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + scheduledRoute("BUS", "360") + ","
+                        + scheduledRoute("SUBWAY", "420") + "]}", MediaType.APPLICATION_JSON));
+        var plan = adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS, new RouteQueryOptions(true, null));
+        assertThat(plan.journeys()).hasSize(1);
+        assertThat(plan.journeys().getFirst().steps().get(1).line().vehicleType()).isEqualTo("SUBWAY");
+        server.verify();
+    }
+
+    @Test
+    void busPreferenceFiltersRailAndReturnsAllConfirmedBusAlternatives() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.transitPreferences.allowedTravelModes[0]").value("BUS"))
+                .andExpect(jsonPath("$.computeAlternativeRoutes").value(true))
+                .andExpect(jsonPath("$.departureTime").doesNotExist())
+                .andRespond(withSuccess("{\"routes\":[" + scheduledRoute("SUBWAY", "360") + ","
+                        + scheduledRoute("BUS", "420") + "," + scheduledRoute("INTERCITY_BUS", "430") + "]}", MediaType.APPLICATION_JSON));
+        var points = List.of(TWO_STATIONS.getFirst(), new RoutePointRequest("hotel", "Hotel", RoutePointType.PLACE,
+                25.046, 121.517, LegTravelMode.BUS));
+        var plan = adapter.computeRoute(RouteProfile.TRANSIT, points, new RouteQueryOptions(true, null));
+        assertThat(plan.journeys()).hasSize(2);
+        assertThat(plan.legs().getFirst().steps().get(1).line().vehicleType()).isEqualTo("BUS");
+        assertThat(plan.journeys()).allMatch(journey -> journey.steps().get(1).line().vehicleType().contains("BUS"));
+        server.verify();
+    }
+
+    @Test
+    void explicitRailPreferenceWorksWithoutTheStationOnlyFlag() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.transitPreferences.allowedTravelModes[0]").value("RAIL"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("BUS")) + ","
+                        + transitRoute(ride("SUBWAY")) + "]}", MediaType.APPLICATION_JSON));
+        var points = List.of(TWO_STATIONS.getFirst(), new RoutePointRequest("hotel", "Hotel", RoutePointType.PLACE,
+                25.046, 121.517, LegTravelMode.RAIL));
+        assertThat(adapter.computeRoute(RouteProfile.TRANSIT, points).legs().getFirst().steps().getFirst().line().vehicleType())
+                .isEqualTo("SUBWAY");
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SUBWAY", "FERRY", "SHARE_TAXI", "OTHER"})
+    void busOnlyRejectsMixedJourneysIncludingNonBusTransfers(String vehicleType) {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("BUS") + "," + ride(vehicleType)) + "]}", MediaType.APPLICATION_JSON));
+        var points = List.of(TWO_STATIONS.getFirst(), new RoutePointRequest("hotel", "Hotel", RoutePointType.PLACE,
+                25.046, 121.517, LegTravelMode.BUS));
+        assertThat(adapter.computeRoute(RouteProfile.TRANSIT, points).legs()).isEmpty();
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"FEWER_TRANSFERS", "LESS_WALKING"})
+    void requestsTheChosenTradeoffWithoutHardwiringFewerTransfers(String preference) {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andExpect(jsonPath("$.transitPreferences.routingPreference").value(preference))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("SUBWAY")) + "]}", MediaType.APPLICATION_JSON));
+        adapter.computeRoute(RouteProfile.TRANSIT, RAIL_STATIONS, new RouteQueryOptions(true, null,
+                com.navio.mobilityandevservice.domain.route.TransitRoutingPreference.valueOf(preference)));
+        server.verify();
+    }
+
+    @Test
+    void leavesUnknownFareAndScheduleAbsentInsteadOfInventingZeroValues() {
+        server.expect(requestTo("https://routes.googleapis.com/directions/v2:computeRoutes"))
+                .andRespond(withSuccess("{\"routes\":[" + transitRoute(ride("SUBWAY")) + "]}", MediaType.APPLICATION_JSON));
+        var journey = adapter.computeRoute(RouteProfile.TRANSIT, TWO_STATIONS,
+                new RouteQueryOptions(true, null)).journeys().getFirst();
+        assertThat(journey.fare()).isNull();
+        assertThat(journey.currency()).isNull();
+        assertThat(journey.departureTime()).isNull();
+        assertThat(journey.arrivalTime()).isNull();
+        assertThat(journey.steps().getFirst().departureLocation()).isNull();
+        server.verify();
+    }
+
+    private static String scheduledRoute(String vehicleType, String fare) {
+        return """
+                {"polyline":{"encodedPolyline":"_p~iF~ps|U_ulLnnqC_mqNvxq`@"},
+                 "travelAdvisory":{"transitFare":{"currencyCode":"JPY","units":"%s","nanos":0}},
+                 "legs":[{"distanceMeters":6000,"duration":"1800s","steps":[
+                   {"travelMode":"WALK","staticDuration":"120s"},
+                   {"travelMode":"TRANSIT","staticDuration":"1020s",
+                    "transitDetails":{"stopDetails":{
+                       "departureStop":{"name":"Boarding Station","location":{"latLng":{"latitude":35.65,"longitude":139.74}}},
+                       "arrivalStop":{"name":"Arrival Station","location":{"latLng":{"latitude":35.68,"longitude":139.68}}},
+                       "departureTime":"2026-10-13T20:05:00Z","arrivalTime":"2026-10-13T20:28:00Z"},
+                    "headsign":"Central","localizedValues":{"departureTime":{"timeZone":"Asia/Tokyo"}},
+                    "transitLine":{"name":"Test Line","vehicle":{"type":"%s"}}}},
+                   {"travelMode":"WALK","staticDuration":"180s"}]}]}
+                """.formatted(fare, vehicleType);
     }
 
     @Test

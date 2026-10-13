@@ -5,16 +5,23 @@ import com.fasterxml.jackson.annotation.JsonValue;
 
 import java.util.Arrays;
 
-/** How the traveller covers one leg: by car, by public transit, or on foot. */
+/** How the traveller covers one leg: by car, public transit, bicycle, or on foot. */
 public enum LegTravelMode {
     DRIVE("drive"),
     TRANSIT("transit"),
+    RAIL("rail"),
+    BUS("bus"),
+    BIKE("bike"),
     WALK("walk");
 
     private final String value;
 
     LegTravelMode(String value) {
         this.value = value;
+    }
+
+    public boolean isTransit() {
+        return this == TRANSIT || this == RAIL || this == BUS;
     }
 
     @JsonValue
