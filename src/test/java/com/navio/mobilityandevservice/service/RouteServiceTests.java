@@ -13,8 +13,6 @@ import com.navio.mobilityandevservice.provider.RouteLeg;
 import com.navio.mobilityandevservice.provider.RoutePlan;
 import com.navio.mobilityandevservice.provider.RouteProvider;
 import org.junit.jupiter.api.Test;
-import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
-import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -24,15 +22,11 @@ import com.navio.mobilityandevservice.exception.InvalidRequestException;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class RouteServiceTests {
 
@@ -261,24 +255,9 @@ class RouteServiceTests {
         return new RoutePointRequest(id, id, RoutePointType.PLACE, lat, lng, arrivalMode);
     }
 
-    @SuppressWarnings("unchecked")
     private static RouteService service(RouteProvider routeProvider) {
-        CircuitBreakerFactory<?, ?> factory = mock(CircuitBreakerFactory.class);
-        CircuitBreaker circuitBreaker = mock(CircuitBreaker.class);
-        when(factory.create("googleRoutes")).thenReturn(circuitBreaker);
-        when(circuitBreaker.run(any(Supplier.class), any(Function.class))).thenAnswer(invocation -> {
-            Supplier<RoutePlan> supplier = invocation.getArgument(0);
-            Function<Throwable, RoutePlan> fallback = invocation.getArgument(1);
-            try {
-                return supplier.get();
-            } catch (Throwable throwable) {
-                return fallback.apply(throwable);
-            }
-        });
-
         return new RouteService(
                 routeProvider,
-                factory,
                 new StaleAwareCache<>(
                         Duration.ofMinutes(1),
                         Duration.ofMinutes(5),

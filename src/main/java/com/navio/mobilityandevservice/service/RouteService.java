@@ -18,8 +18,6 @@ import com.navio.mobilityandevservice.provider.RouteQueryOptions;
 import com.navio.mobilityandevservice.domain.route.TransitJourneyResponse;
 import com.navio.mobilityandevservice.exception.InvalidRequestException;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
-import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -37,7 +35,6 @@ import java.util.concurrent.Future;
 @Service
 public class RouteService {
 
-    private static final String CIRCUIT_BREAKER_NAME = "googleRoutes";
     private static final String FALLBACK_REASON = "Road route is temporarily unavailable";
     private static final String TRANSIT_FALLBACK_REASON = "No public transit route was found";
     private static final String RAIL_FALLBACK_REASON = "No rail route was found";
@@ -45,16 +42,13 @@ public class RouteService {
     private static final double EARTH_RADIUS_METERS = 6_371_000;
 
     private final RouteProvider routeProvider;
-    private final CircuitBreaker circuitBreaker;
     private final StaleAwareCache<RoutePlan> routePlanCache;
 
     public RouteService(
             RouteProvider routeProvider,
-            CircuitBreakerFactory<?, ?> circuitBreakerFactory,
             @Qualifier("routePlanCache") StaleAwareCache<RoutePlan> routePlanCache
     ) {
         this.routeProvider = routeProvider;
-        this.circuitBreaker = circuitBreakerFactory.create(CIRCUIT_BREAKER_NAME);
         this.routePlanCache = routePlanCache;
     }
 
@@ -146,7 +140,7 @@ public class RouteService {
     }
 
     private RoutePlan resolveRoutePlan(RouteProfile profile, List<RoutePointRequest> points, RouteQueryOptions options) {
-        String cacheKey = routeCacheKey(profile, points);
+        String cacheKey = routeProvider.cacheNamespace(profile) + ":" + routeCacheKey(profile, points);
         if (options.includeTransitAlternatives() || options.departureTime() != null) {
             Instant departure = options.departureTime() == null ? Instant.now().truncatedTo(ChronoUnit.MINUTES) : options.departureTime();
             cacheKey += ":journeys:" + options.includeTransitAlternatives() + ":" + departure;
@@ -154,16 +148,17 @@ public class RouteService {
 
         if (options.transitRoutingPreference() != null) cacheKey += ":preference:" + options.transitRoutingPreference();
         String resolvedCacheKey = cacheKey;
-        return routePlanCache.getFresh(resolvedCacheKey).orElseGet(() -> circuitBreaker.run(
-                () -> {
-                    RoutePlan routePlan = options.equals(RouteQueryOptions.DEFAULT)
-                            ? routeProvider.computeRoute(profile, points)
-                            : routeProvider.computeRoute(profile, points, options);
-                    routePlanCache.put(resolvedCacheKey, routePlan);
-                    return routePlan;
-                },
-                throwable -> routePlanCache.getStale(resolvedCacheKey).orElse(null)
-        ));
+        return routePlanCache.getFresh(resolvedCacheKey).orElseGet(() -> {
+            try {
+                RoutePlan routePlan = options.equals(RouteQueryOptions.DEFAULT)
+                        ? routeProvider.computeRoute(profile, points)
+                        : routeProvider.computeRoute(profile, points, options);
+                routePlanCache.put(resolvedCacheKey, routePlan);
+                return routePlan;
+            } catch (RuntimeException exception) {
+                return routePlanCache.getStale(resolvedCacheKey).orElse(null);
+            }
+        });
     }
 
     private List<RouteSegmentResponse> toSegments(

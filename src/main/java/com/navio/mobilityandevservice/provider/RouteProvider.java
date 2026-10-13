@@ -7,6 +7,10 @@ import java.util.List;
 
 public interface RouteProvider {
 
+    default String cacheNamespace(RouteProfile profile) {
+        return "google";
+    }
+
     RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points);
 
     default RoutePlan computeRoute(RouteProfile profile, List<RoutePointRequest> points, RouteQueryOptions options) {

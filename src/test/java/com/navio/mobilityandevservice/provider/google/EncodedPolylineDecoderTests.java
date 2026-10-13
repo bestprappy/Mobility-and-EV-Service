@@ -1,5 +1,7 @@
 package com.navio.mobilityandevservice.provider.google;
 
+import com.navio.mobilityandevservice.provider.EncodedPolylineDecoder;
+
 import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 import org.junit.jupiter.api.Test;
 

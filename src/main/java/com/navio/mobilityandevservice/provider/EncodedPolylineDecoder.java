@@ -1,16 +1,16 @@
-package com.navio.mobilityandevservice.provider.google;
+package com.navio.mobilityandevservice.provider;
 
 import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 
 import java.util.ArrayList;
 import java.util.List;
 
-final class EncodedPolylineDecoder {
+public final class EncodedPolylineDecoder {
 
     private EncodedPolylineDecoder() {
     }
 
-    static List<RouteCoordinate> decode(String encodedPolyline) {
+    public static List<RouteCoordinate> decode(String encodedPolyline) {
         if (encodedPolyline == null || encodedPolyline.isBlank()) {
             return List.of();
         }

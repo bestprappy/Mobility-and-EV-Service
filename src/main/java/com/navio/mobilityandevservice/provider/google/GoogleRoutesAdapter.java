@@ -14,6 +14,7 @@ import com.navio.mobilityandevservice.provider.RouteLeg;
 import com.navio.mobilityandevservice.provider.RoutePlan;
 import com.navio.mobilityandevservice.provider.RouteProvider;
 import com.navio.mobilityandevservice.provider.RouteQueryOptions;
+import com.navio.mobilityandevservice.provider.EncodedPolylineDecoder;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;

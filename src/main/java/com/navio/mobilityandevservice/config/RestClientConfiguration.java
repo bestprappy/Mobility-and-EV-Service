@@ -11,10 +11,13 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
+import java.net.http.HttpClient;
+
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(GoogleMapsProperties.class)
+@EnableConfigurationProperties({GoogleMapsProperties.class, OpenTripPlannerProperties.class})
 public class RestClientConfiguration {
 
     public static final String GOOGLE_API_KEY_HEADER = "X-Goog-Api-Key";
@@ -45,6 +48,25 @@ public class RestClientConfiguration {
             GoogleMapsProperties properties
     ) {
         return createGoogleClient(builder, properties.apiKey(), properties.routes());
+    }
+
+    @Bean
+    RestClient openTripPlannerRestClient(
+            @Qualifier("externalRestClientBuilder") RestClient.Builder builder,
+            OpenTripPlannerProperties properties
+    ) {
+        // OTP's Grizzly server does not correctly handle the JDK client's h2c upgrade body.
+        // Use HTTP/1.1 for this local/self-hosted endpoint; Google's HTTPS clients stay unchanged.
+        HttpClient httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(properties.connectTimeout()).build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(properties.readTimeout());
+        return builder.clone()
+                .baseUrl(properties.endpoint().toString())
+                .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                .defaultHeader(HttpHeaders.ACCEPT_LANGUAGE, "en")
+                .requestFactory(requestFactory)
+                .build();
     }
 
     private RestClient createGoogleClient(
