@@ -20,6 +20,13 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(DiscoveryBusyException.class)
+    ResponseEntity<ApiErrorResponse> handleDiscoveryBusy(DiscoveryBusyException exception) {
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "1")
+                .body(new ApiErrorResponse(Instant.now(), 429, "Place discovery is busy",
+                        "Try again shortly", null));
+    }
+
     @ExceptionHandler(ProviderUnavailableException.class)
     ResponseEntity<ApiErrorResponse> handleProviderUnavailable(ProviderUnavailableException exception) {
         log.warn("Mobility provider is unavailable", exception);

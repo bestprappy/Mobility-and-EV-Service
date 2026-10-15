@@ -3,3 +3,9 @@ spring:
     name: mobility-and-ev-service
   config:
     import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}
+
+# Per-instance provider protection; shared by discovery lists and place readers.
+navio:
+  discovery:
+    requests-per-minute: 60
+    max-concurrent: 4

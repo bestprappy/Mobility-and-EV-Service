@@ -5,6 +5,10 @@ import com.navio.mobilityandevservice.domain.ev.EvChargerResponse;
 import com.navio.mobilityandevservice.domain.ev.EvChargerStatus;
 import com.navio.mobilityandevservice.domain.ev.EvConnectorType;
 import com.navio.mobilityandevservice.domain.place.OpeningHoursResponse;
+import com.navio.mobilityandevservice.domain.place.PlaceDiscoveryCandidate;
+import com.navio.mobilityandevservice.domain.place.PlaceDiscoveryResponse;
+import com.navio.mobilityandevservice.domain.place.PlaceExploreCandidate;
+import com.navio.mobilityandevservice.domain.place.PlaceExploreSuggestion;
 import com.navio.mobilityandevservice.domain.place.PlaceAutocompleteResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceDetailResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceLocationResponse;
@@ -180,6 +184,96 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
         return mapSearchResponse(response);
     }
 
+    /** Uncached, bounded popularity pool. Photo media is resolved only after pagination. */
+    public List<PlaceDiscoveryCandidate> discovery(double lat, double lng, List<String> types) {
+        GooglePlaceListResponse response = execute("discovery", () -> restClient.post()
+                .uri("/places:searchNearby")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-Goog-FieldMask", SEARCH_FIELD_MASK + ",places.businessStatus,places.photos")
+                .body(new GoogleNearbySearchRequest(new GoogleLocationRestriction(
+                        new GoogleCircle(new GoogleLatLng(lat, lng), 25000)), 20, "POPULARITY", types))
+                .retrieve().body(GooglePlaceListResponse.class));
+        return safeList(response.places()).stream().filter(Objects::nonNull)
+                .filter(place -> place.location() != null && place.id() != null)
+                .map(place -> candidate(place, null)).toList();
+    }
+
+    public PlaceDiscoveryCandidate reader(String id) {
+        GooglePlace place = execute("place reader", () -> restClient.get()
+                .uri("/places/{id}", id)
+                .header("X-Goog-FieldMask", PLACE_FIELD_MASK + ",businessStatus,editorialSummary")
+                .retrieve().body(GooglePlace.class));
+        // Only the detail reader resolves a small gallery; discovery cards still resolve one photo.
+        var photos = new java.util.ArrayList<PlaceDiscoveryResponse.Photo>();
+        var seen = new java.util.HashSet<String>();
+        for (var photo : safeList(place.photos()).stream()
+                .filter(p -> p != null && p.name() != null && !p.name().isBlank())
+                .filter(p -> seen.add(p.name())).limit(3).toList()) {
+            var url = loadPhotoResource(photo.name(), place.id());
+            if (url != null && !url.isBlank()) photos.add(new PlaceDiscoveryResponse.Photo(url,
+                    safeList(photo.authorAttributions()).stream().filter(Objects::nonNull)
+                            .map(a -> new PlaceDiscoveryResponse.Attribution(a.displayName(), a.uri(), a.photoUri())).toList(), photo.googleMapsUri()));
+        }
+        var base = candidate(place, photos.isEmpty() ? null : photos.getFirst().url());
+        return new PlaceDiscoveryCandidate(base.place(), base.businessStatus(), base.photoResource(),
+                photos.isEmpty() ? List.of() : photos.getFirst().attributions(),
+                photos.isEmpty() ? null : photos.getFirst().googleMapsUri(), List.copyOf(photos));
+    }
+
+    public record ExplorePage(List<PlaceExploreCandidate> items, String nextPageToken) {}
+
+    /** Separate from the planner's established text search: country verification needs address components. */
+    public ExplorePage exploreSearch(String query, String type, String country, String pageToken) {
+        var response = execute("Explore search", () -> restClient.post().uri("/places:searchText")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-Goog-FieldMask",SEARCH_FIELD_MASK+",places.addressComponents,places.types,places.businessStatus,places.photos,places.editorialSummary,nextPageToken")
+                .body(new GoogleExploreRequest(query,12,blankToNull(pageToken),blankToNull(type),
+                        !type.isEmpty() && !type.equals("hotel"),blankToNull(country)))
+                .retrieve().body(GooglePlaceListResponse.class));
+        return new ExplorePage(safeList(response.places()).stream().filter(Objects::nonNull)
+                .filter(p -> p.id()!=null && p.location()!=null)
+                .map(p -> new PlaceExploreCandidate(candidate(p,null),safeList(p.types()))).toList(),response.nextPageToken());
+    }
+
+    public List<PlaceExploreSuggestion> exploreSuggestions(String query, String country) {
+        var response = execute("Explore suggestions",() -> restClient.post().uri("/places:autocomplete")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-Goog-FieldMask","suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.types,suggestions.queryPrediction.text.text")
+                .body(new GoogleExploreAutocomplete(query,country.isEmpty(),country.isEmpty()?null:List.of(country.toLowerCase(Locale.ROOT))))
+                .retrieve().body(GoogleExploreAutocompleteResponse.class));
+        return safeList(response.suggestions()).stream().filter(Objects::nonNull).map(s -> {
+            if (s.placePrediction()!=null && s.placePrediction().placeId()!=null && text(s.placePrediction().text())!=null) {
+                String label=text(s.placePrediction().text());
+                boolean geographic=safeList(s.placePrediction().types()).stream().anyMatch(java.util.Set.of("country","locality","administrative_area_level_1","administrative_area_level_2","political")::contains);
+                return geographic ? new PlaceExploreSuggestion("query",label,label,null,null)
+                        : new PlaceExploreSuggestion("place",label,"",s.placePrediction().placeId(),null);
+            }
+            if (s.queryPrediction()!=null && text(s.queryPrediction().text())!=null)
+                return new PlaceExploreSuggestion("query",text(s.queryPrediction().text()),text(s.queryPrediction().text()),null,null);
+            return null;
+        }).filter(Objects::nonNull).limit(5).toList();
+    }
+
+    private PlaceDiscoveryCandidate candidate(GooglePlace place, String photoUrl) {
+        GooglePhoto photo = safeList(place.photos()).stream().findFirst().orElse(null);
+        return new PlaceDiscoveryCandidate(mapPlace(place, place.id(), photoUrl), place.businessStatus(),
+                photo == null ? null : photo.name(),
+                photo == null ? List.of() : safeList(photo.authorAttributions()).stream()
+                        .map(author -> new PlaceDiscoveryResponse.Attribution(author.displayName(), author.uri(), author.photoUri())).toList(),
+                photo == null ? null : photo.googleMapsUri());
+    }
+
+    public PlaceDiscoveryCandidate withPhoto(PlaceDiscoveryCandidate candidate) {
+        if (candidate.photoResource() == null) return candidate;
+        String url = loadPhotoResource(candidate.photoResource(), candidate.place().providerPlaceId());
+        PlaceDetailResponse p = candidate.place();
+        PlaceDetailResponse enriched = new PlaceDetailResponse(p.provider(), p.providerPlaceId(), p.name(),
+                p.address(), p.location(), p.phone(), p.website(), url, p.openingHours(), p.category(),
+                p.description(), p.rating(), p.reviewCount(), p.placeLocation(), p.primaryType());
+        return new PlaceDiscoveryCandidate(enriched, candidate.businessStatus(), candidate.photoResource(),
+                candidate.photoAttributions(), candidate.photoGoogleMapsUri());
+    }
+
     @Override
     public List<EvChargerResponse> nearbyEvChargers(double lat, double lng, int radiusMeters) {
         GoogleNearbySearchRequest request = new GoogleNearbySearchRequest(
@@ -269,7 +363,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 photoUrl,
                 mapOpeningHours(place.regularOpeningHours()),
                 category,
-                category,
+                text(place.editorialSummary()),
                 place.rating(),
                 place.userRatingCount(),
                 GooglePlaceLocationMapper.map(place.addressComponents()),
@@ -394,8 +488,12 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             return null;
         }
 
+        return loadPhotoResource(photo.name(), place.id());
+    }
+
+    private String loadPhotoResource(String resource, String placeId) {
         try {
-            String[] resourceSegments = photo.name().split("/");
+            String[] resourceSegments = resource.split("/");
             GooglePhotoMedia media = restClient.get()
                     .uri(uriBuilder -> uriBuilder
                             .pathSegment(resourceSegments)
@@ -407,7 +505,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                     .body(GooglePhotoMedia.class);
             return media == null ? null : media.photoUri();
         } catch (RestClientException exception) {
-            log.warn("Google place photo could not be loaded for placeId={}", place.id());
+            log.warn("Google place photo could not be loaded for placeId={}", placeId);
             return null;
         }
     }
@@ -513,7 +611,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     private record GoogleText(String text) {
     }
 
-    private record GooglePlaceListResponse(List<GooglePlace> places) {
+    private record GooglePlaceListResponse(List<GooglePlace> places, String nextPageToken) {
     }
 
     private record GooglePlace(
@@ -532,7 +630,9 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             String primaryType,
             String businessStatus,
             GoogleEvChargeOptions evChargeOptions,
-            List<GoogleAddressComponent> addressComponents
+            List<GoogleAddressComponent> addressComponents,
+            GoogleText editorialSummary,
+            List<String> types
     ) {
     }
 
@@ -551,12 +651,23 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     ) {
     }
 
-    private record GooglePhoto(String name) {
+    private record GooglePhoto(String name, List<GoogleAuthorAttribution> authorAttributions, String googleMapsUri) {
     }
+
+    private record GoogleAuthorAttribution(String displayName, String uri, String photoUri) {}
 
     private record GooglePhotoMedia(String photoUri) {
     }
 
     private record GoogleOpeningHours(Boolean openNow, List<String> weekdayDescriptions) {
     }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record GoogleExploreRequest(String textQuery, int pageSize, String pageToken, String includedType,
+            boolean strictTypeFiltering, String regionCode) {}
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record GoogleExploreAutocomplete(String input, boolean includeQueryPredictions, List<String> includedRegionCodes) {}
+    private record GoogleExploreAutocompleteResponse(List<GoogleExplorePrediction> suggestions) {}
+    private record GoogleExplorePrediction(GooglePlacePrediction placePrediction, GoogleQueryPrediction queryPrediction) {}
+    private record GoogleQueryPrediction(GoogleText text) {}
 }

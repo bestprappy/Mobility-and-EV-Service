@@ -21,6 +21,63 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 
 class GooglePlacesAdapterTests {
 
+    @Test void readerReturnsAtMostThreeDistinctPhotosWithTheirOwnAttribution() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places/garden"))
+                .andRespond(withSuccess("""
+                    {"id":"garden","displayName":{"text":"Garden"},"location":{"latitude":35.7,"longitude":139.7},
+                    "photos":[{"name":"places/garden/photos/one","authorAttributions":[{"displayName":"One"}]},
+                    {"name":"places/garden/photos/one","authorAttributions":[{"displayName":"One"}]},
+                    {"name":"places/garden/photos/two","authorAttributions":[{"displayName":"Two"}]},
+                    {"name":"places/garden/photos/three","authorAttributions":[{"displayName":"Three"}]},
+                    {"name":"places/garden/photos/four"}]}
+                    """, MediaType.APPLICATION_JSON));
+        for (String name : java.util.List.of("one", "two", "three")) {
+            server.expect(requestTo("https://places.googleapis.com/v1/places/garden/photos/" + name + "/media?maxWidthPx=960&skipHttpRedirect=true"))
+                    .andRespond(withSuccess("{\"photoUri\":\"https://example.com/" + name + ".jpg\"}", MediaType.APPLICATION_JSON));
+        }
+        var result = adapter.reader("garden");
+        assertThat(result.photos()).hasSize(3);
+        assertThat(result.photos().get(1).attributions().getFirst().displayName()).isEqualTo("Two");
+        assertThat(result.place().photoUrl()).isEqualTo("https://example.com/one.jpg");
+        server.verify();
+    }
+
+    @Test void geographicPredictionsSubmitDiscoveryQueriesInsteadOfOpeningCountryCards() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places:autocomplete"))
+                .andRespond(withSuccess("""
+                    {"suggestions":[{"placePrediction":{"placeId":"osaka","text":{"text":"Osaka, Japan"},"types":["locality","political"]}}]}
+                    """,MediaType.APPLICATION_JSON));
+        var suggestion=adapter.exploreSuggestions("Osaka","JP").getFirst();
+        assertThat(suggestion.kind()).isEqualTo("query"); assertThat(suggestion.placeId()).isNull();
+        assertThat(suggestion.value()).isEqualTo("Osaka, Japan"); server.verify();
+    }
+
+    @Test void exploreRequestsCountryEvidenceAndProviderCursorWithoutTouchingExistingSearch() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places:searchText"))
+                .andExpect(header("X-Goog-FieldMask",containsString("places.addressComponents")))
+                .andExpect(content().string(containsString("\"pageToken\":\"next\"")))
+                .andExpect(content().string(containsString("\"includedType\":\"restaurant\"")))
+                .andExpect(org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath("$.locationBias").doesNotExist())
+                .andRespond(withSuccess("""
+                  {"places":[{"id":"p","displayName":{"text":"Sushi"},"location":{"latitude":35.7,"longitude":139.7},
+                  "types":["restaurant","food"],"primaryType":"restaurant",
+                  "addressComponents":[{"shortText":"JP","longText":"Japan","types":["country"]}]}],"nextPageToken":"more"}
+                  """,MediaType.APPLICATION_JSON));
+        var page = adapter.exploreSearch("sushi in Japan","restaurant","JP","next");
+        assertThat(page.nextPageToken()).isEqualTo("more");
+        assertThat(page.items().getFirst().candidate().place().placeLocation().countryCode()).isEqualTo("JP");
+        assertThat(page.items().getFirst().types()).contains("restaurant");
+        server.verify();
+    }
+
+    @Test void exploreCountrySuggestionsDoNotAskForUnsupportedQueryPredictions() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places:autocomplete"))
+                .andExpect(content().string(containsString("\"includeQueryPredictions\":false")))
+                .andExpect(content().string(containsString("\"includedRegionCodes\":[\"jp\"]")))
+                .andRespond(withSuccess("{\"suggestions\":[]}",MediaType.APPLICATION_JSON));
+        assertThat(adapter.exploreSuggestions("Osaka","JP")).isEmpty(); server.verify();
+    }
+
     private MockRestServiceServer server;
     private GooglePlacesAdapter adapter;
 
@@ -31,6 +88,26 @@ class GooglePlacesAdapterTests {
                 .defaultHeader("X-Goog-Api-Key", "test-key");
         server = MockRestServiceServer.bindTo(builder).build();
         adapter = new GooglePlacesAdapter(builder.build());
+    }
+
+    @Test
+    void discoveryUsesBoundedPopularityPoolAndPreservesPhotoAttributionWithoutLoadingMedia() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places:searchNearby"))
+                .andExpect(header("X-Goog-FieldMask", containsString("places.businessStatus,places.photos")))
+                .andExpect(content().string(containsString("\"rankPreference\":\"POPULARITY\"")))
+                .andExpect(content().string(containsString("\"maxResultCount\":20")))
+                .andRespond(withSuccess("""
+                    {"places":[{"id":"p","displayName":{"text":"Museum"},
+                    "location":{"latitude":13.7,"longitude":100.5},"businessStatus":"OPERATIONAL",
+                    "photos":[{"name":"places/p/photos/photo","googleMapsUri":"https://maps.google.com/photo","authorAttributions":[{"displayName":"Photographer","uri":"https://example.com/author","photoUri":"https://example.com/avatar"}]}]}]}
+                    """, MediaType.APPLICATION_JSON));
+        var places = adapter.discovery(13.7,100.5,java.util.List.of("museum"));
+        assertThat(places).hasSize(1);
+        assertThat(places.getFirst().place().photoUrl()).isNull();
+        assertThat(places.getFirst().photoGoogleMapsUri()).isEqualTo("https://maps.google.com/photo");
+        assertThat(places.getFirst().photoAttributions().getFirst().photoUri()).isEqualTo("https://example.com/avatar");
+        assertThat(places.getFirst().photoAttributions().getFirst().displayName()).isEqualTo("Photographer");
+        server.verify();
     }
 
     @Test
