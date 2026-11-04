@@ -29,6 +29,7 @@ import java.util.Set;
 public class EvRouteOptimizationService {
 
     private static final double DEFAULT_FALLBACK_SPEED_KMH = 60;
+    private static final double UNCHANGED_TARGET_TOLERANCE_PCT = 0.5;
 
     private final RouteService routeService;
     private final RouteCorridorChargerFinder chargerFinder;
@@ -55,25 +56,24 @@ public class EvRouteOptimizationService {
             stops.set(0, protectEndpoint(stops.getFirst()));
             stops.set(stops.size() - 1, protectEndpoint(stops.getLast()));
         }
-        var result = optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
-                preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()));
-        if (result.feasible() && !request.followingDays().isEmpty()) {
-            var last = request.stops().getLast();
-            // Carry only the selected day's final state/position; do not charge or observe its last stop twice.
-            var boundary = new EvRouteStopRequest(last.itemId(), last.name(), last.lat(), last.lng(), null, false, null);
-            var replay = new ArrayList<EvRouteOptimizationRequest.Day>();
-            replay.add(new EvRouteOptimizationRequest.Day(request.blockId(), List.of(boundary)));
-            replay.addAll(request.followingDays());
-            var end = replay.stream().filter(day -> !day.stops().isEmpty()).reduce((a, b) -> b).orElseThrow().stops().getLast();
-            var onward = PrecedingTripEnergy.resolve(new EvRouteOptimizationRequest(request.blockId(), List.of(end), request.vehicle(),
-                    result.finalSocPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), replay), routeService);
-            if (onward.failure() != null) {
-                String message = "The proposed plan leaves a later day unavailable, disconnected or below reserve. Review the later itinerary before applying.";
-                return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), result.finalSocPct(),
-                        result.totalDrivingSeconds(), result.totalChargingMinutes(), message, List.of(message, onward.failure()));
-            }
-        }
-        return result;
+        return optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
+                preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()),
+                request.followingDays());
+    }
+
+    /** Replays the later days from where and with what the selected day ends. */
+    private PrecedingTripEnergy.State laterDays(EvRouteOptimizationRequest request, OptimizationSearchResult plan,
+                                                List<EvRouteOptimizationRequest.Day> followingDays) {
+        if (followingDays.isEmpty()) return new PrecedingTripEnergy.State(plan.finalSocPct(), null, false);
+        var last = request.stops().getLast();
+        // Carry only the selected day's final state/position; do not charge or observe its last stop twice.
+        var boundary = new EvRouteStopRequest(last.itemId(), last.name(), last.lat(), last.lng(), null, false, null);
+        var replay = new ArrayList<EvRouteOptimizationRequest.Day>();
+        replay.add(new EvRouteOptimizationRequest.Day(request.blockId(), List.of(boundary)));
+        replay.addAll(followingDays);
+        var end = replay.stream().filter(day -> !day.stops().isEmpty()).reduce((a, b) -> b).orElseThrow().stops().getLast();
+        return PrecedingTripEnergy.resolve(new EvRouteOptimizationRequest(request.blockId(), List.of(end), request.vehicle(),
+                plan.finalSocPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), replay), routeService);
     }
 
     private EvRouteStopRequest protectEndpoint(EvRouteStopRequest stop) {
@@ -84,7 +84,8 @@ public class EvRouteOptimizationService {
                 true, stop.selectionSource(), stop.targetBatteryPct(), stop.observedSocPct(), stop.estimatedChargeMinutes(), stop.chargingDurationMinutes(), stop.plannedDepartureSocPct());
     }
 
-    private EvRouteOptimizationResponse optimizeDay(EvRouteOptimizationRequest request) {
+    private EvRouteOptimizationResponse optimizeDay(EvRouteOptimizationRequest request,
+                                                    List<EvRouteOptimizationRequest.Day> followingDays) {
         List<EvRouteStopRequest> mandatoryStops = request.stops().stream()
                 .filter(stop -> !stop.chargerStop() || stop.effectiveLocked())
                 .toList();
@@ -110,27 +111,67 @@ public class EvRouteOptimizationService {
                 request,
                 replaceableStops
         );
-        OptimizationSearchResult result = routeOptimizer.optimize(routeWithCandidates, request);
-        if (result.feasible()) {
-            result = OptimizedRouteVerifier.verify(routeWithCandidates, request, result, routeService);
-        }
-        if (!result.feasible()) {
-            return new EvRouteOptimizationResponse(
-                    request.blockId(),
-                    false,
-                    List.of(),
-                    result.finalSocPct(),
-                    result.totalDrivingSeconds(),
-                    result.totalChargingMinutes(),
-                    "No safe compatible charging plan could be found.",
-                    result.warnings()
-            );
-        }
+        OptimizationSearchResult search = routeOptimizer.optimize(routeWithCandidates, request);
+        if (!search.feasible()) return infeasible(request, routeWithCandidates, search);
 
+        // Search works from corridor estimates and stops at the cheapest plan for this day alone. A
+        // plan that charges more can still pass where the cheapest fails the road check or the next day.
+        List<OptimizationSearchResult> plans = new ArrayList<>();
+        plans.add(search);
+        plans.addAll(search.costlierAlternatives());
+        OptimizationSearchResult firstRejected = null;
+        OptimizationSearchResult withShortfallLater = null;
+        for (OptimizationSearchResult plan : plans) {
+            OptimizationSearchResult verified = OptimizedRouteVerifier.verify(routeWithCandidates, request, plan, routeService);
+            if (!verified.feasible()) {
+                if (firstRejected == null) firstRejected = verified;
+                continue;
+            }
+            var later = laterDays(request, verified, followingDays);
+            if (later.failure() == null) return feasible(request, routeWithCandidates, verified, List.of());
+            if (!later.batteryShortfall()) {
+                // A gap, unknown route or low observed reading on a later day is not fixed by charging more today.
+                String message = "The proposed plan leaves a later day unavailable, disconnected or below reserve. Review the later itinerary before applying.";
+                return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), verified.finalSocPct(),
+                        verified.totalDrivingSeconds(), verified.totalChargingMinutes(), message, List.of(message, later.failure()));
+            }
+            if (withShortfallLater == null) withShortfallLater = verified;
+        }
+        if (withShortfallLater != null) {
+            // Days plan in order. Refusing here would deadlock: the later day refuses until this one is safe.
+            return feasible(request, routeWithCandidates, withShortfallLater,
+                    List.of("A later day still runs short of battery with this plan. Plan charging for that day next."));
+        }
+        return infeasible(request, routeWithCandidates, firstRejected);
+    }
+
+    private EvRouteOptimizationResponse infeasible(EvRouteOptimizationRequest request, OptimizationRoute route, OptimizationSearchResult result) {
+        return new EvRouteOptimizationResponse(
+                request.blockId(),
+                false,
+                List.of(),
+                result.finalSocPct(),
+                result.totalDrivingSeconds(),
+                result.totalChargingMinutes(),
+                route.failedChargerSearches() > 0
+                        ? "Charger search is temporarily unavailable, so a charging plan could not be found. Try again shortly."
+                        : "No safe compatible charging plan could be found.",
+                result.warnings()
+        );
+    }
+
+    private EvRouteOptimizationResponse feasible(EvRouteOptimizationRequest request, OptimizationRoute route,
+                                                 OptimizationSearchResult result, List<String> extraWarnings) {
         List<EvPlanOperation> operations = buildOperations(request, result.chargeStops());
-        String message = operations.isEmpty()
+        long changes = operations.stream().filter(operation -> changesThePlan(operation, request)).count();
+        String message = changes == 0
                 ? "The current charging plan is already efficient."
-                : "Found " + operations.size() + " EV route change" + (operations.size() == 1 ? "." : "s.");
+                : "Found " + changes + " EV route change" + (changes == 1 ? "." : "s.");
+        List<String> warnings = new ArrayList<>(result.warnings());
+        warnings.addAll(extraWarnings);
+        if (route.failedChargerSearches() > 0) {
+            warnings.add("Part of the charger search was unavailable, so a closer or faster charger may be missing from this plan.");
+        }
         return new EvRouteOptimizationResponse(
                 request.blockId(),
                 true,
@@ -139,8 +180,19 @@ public class EvRouteOptimizationService {
                 result.totalDrivingSeconds(),
                 result.totalChargingMinutes(),
                 message,
-                result.warnings()
+                warnings
         );
+    }
+
+    /** Every kept stop gets an update to refresh its snapshot; only a different charge target is a change. */
+    private boolean changesThePlan(EvPlanOperation operation, EvRouteOptimizationRequest request) {
+        if (operation.type() != EvPlanOperationType.UPDATE_CHARGER) return true;
+        Double savedTarget = request.stops().stream()
+                .filter(stop -> stop.itemId().equals(operation.oldItemId()))
+                .map(EvRouteStopRequest::effectiveTargetSocPct)
+                .filter(Objects::nonNull)
+                .findFirst().orElse(null);
+        return savedTarget == null || Math.abs(savedTarget - operation.departureSocPct()) > UNCHANGED_TARGET_TOLERANCE_PCT;
     }
 
     private OptimizationRoute computeBaseRoute(String blockId, List<EvRouteStopRequest> mandatoryStops) {

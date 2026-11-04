@@ -86,6 +86,34 @@ class PrecedingTripEnergyTests {
         assertThat(result.failure()).isNull();
         assertThat(result.socPct()).isEqualTo(70);
     }
+    @Test void unknownChargingPowerCannotCertifyAPrecedingTargetCharge() {
+        var request = withCharge(EvConnectorType.CCS2, 80, null);
+        var charger = request.precedingDays().getFirst().stops().get(1).charger();
+        when(charger.maxKw()).thenReturn(0.0);
+        var result = PrecedingTripEnergy.resolve(request, routes(25000, RouteSegmentStatus.ROUTED));
+        assertThat(result.failure()).isNotNull();
+        assertThat(result.socPct()).isNull();
+    }
+
+    @Test void alreadyMetTargetDoesNotRequireChargingPower() {
+        var request = withCharge(EvConnectorType.CCS2, 50, null);
+        when(request.precedingDays().getFirst().stops().get(1).charger().maxKw()).thenReturn(0.0);
+        var result = PrecedingTripEnergy.resolve(request, routes(25000, RouteSegmentStatus.ROUTED));
+        assertThat(result.failure()).isNull();
+        assertThat(result.socPct()).isEqualTo(50);
+    }
+
+    @Test void ambiguousDuplicatePriorLegsCannotCertifyBatteryState() {
+        var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1",
+                List.of(stop("a", 100, null), stop("b", 102, null)))));
+        var routes = mock(RouteService.class);
+        var shortLeg = new RouteSegmentResponse("short", "day-1", "a", "b", "a", "b",
+                RouteSegmentStatus.ROUTED, null, 10000L, 600L, null);
+        var longLeg = new RouteSegmentResponse("long", "day-1", "a", "b", "a", "b",
+                RouteSegmentStatus.ROUTED, null, 300000L, 600L, null);
+        when(routes.computeDirections(any())).thenReturn(new DirectionsResponse(List.of(shortLeg, longLeg)));
+        assertThat(PrecedingTripEnergy.resolve(request, routes).failure()).isNotNull();
+    }
     @Test void savedDurationChargingRetainsFractionalBatteryState() {
         var result = PrecedingTripEnergy.resolve(withCharge(EvConnectorType.CCS2,null,10), routes(25000,RouteSegmentStatus.ROUTED));
         assertThat(result.socPct()).isCloseTo(66.66666666666667, org.assertj.core.data.Offset.offset(1e-9));

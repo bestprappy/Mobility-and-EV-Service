@@ -33,6 +33,83 @@ import static org.mockito.Mockito.when;
 class EvRouteOptimizationServiceTests {
 
     @Test
+    void corridorRetainsChargersNearBothEndpointsButRejectsExcessiveDetours() {
+        var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var stations = List.of(
+                charger("at-origin", 13, 100, 50, .9, false),
+                charger("near-origin", 13, 100.015, 50, .9, false),
+                charger("near-destination", 13, 102.985, 50, .9, false),
+                charger("at-destination", 13, 103, 50, .9, false),
+                charger("far-off-route", 14, 101, 50, .9, false));
+        when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(stations, null));
+        var route = new OptimizationRoute(List.of(new OptimizationRouteSpan(0,
+                base.stops().getFirst(), base.stops().getLast(), 300, 14400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)), List.of())));
+        var result = new RouteCorridorChargerFinder(service).populateCandidates(route, base, List.of());
+        assertThat(result.spans().getFirst().candidates()).extracting(candidate -> candidate.charger().id())
+                .containsExactly("at-origin", "near-origin", "near-destination", "at-destination");
+    }
+
+    @Test
+    void automaticStopsRespectTheRequestedMinimumChargeTarget() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var candidate = candidate(charger("target", 13, 101, 180, .9, false), 30, 0, null);
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(),
+                90, 3600, List.of(candidate))));
+        for (double target : List.of(70.0, 95.0)) {
+            var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                    30.0, 10.0, target, 20.0);
+            var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+            assertThat(result.feasible()).isTrue();
+            assertThat(result.chargeStops()).hasSize(1);
+            assertThat(result.chargeStops().getFirst().departureSocPct()).isGreaterThanOrEqualTo(target);
+        }
+    }
+
+    @Test
+    void chargingAtAnUnlockedDayOriginUpdatesItWithoutRelocatingIt() {
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoadRoutes(routes);
+        when(finder.populateCandidates(any(), any(), any())).thenAnswer(call -> call.getArgument(0));
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var origin = new EvRouteStopRequest("origin-charger", "Origin charger", 13, 100,
+                charger("origin-station", 13, 100, 180, .9, false), false, EvChargerSelectionSource.MANUAL);
+        var end = new EvRouteStopRequest("midpoint", "Destination", 13, 101, null, false, null);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(origin, end),
+                base.vehicle(), 10.0, 10.0, 70.0, 20.0);
+        var result = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.operations()).hasSize(1);
+        assertThat(result.operations().getFirst().oldItemId()).isEqualTo("origin-charger");
+        assertThat(result.operations().getFirst().beforeItemId()).isNull();
+    }
+
+    @Test
+    void returnTripCanChargeAtTwoSeparateVisitsToTheSameLockedStation() {
+        var station = charger("same-station", 13, 100, 180, .9, false);
+        var first = new EvRouteStopRequest("visit-1", "First visit", 13, 100, station, true, null, 80);
+        var middle = new EvRouteStopRequest("outbound", "Out and back", 13, 101, null, false, null);
+        var second = new EvRouteStopRequest("visit-2", "Return visit", 13, 100, station, true, null, 80);
+        var end = new EvRouteStopRequest("end", "End", 13, 102, null, false, null);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(first, middle, second, end),
+                base.vehicle(), 20.0, 10.0, 70.0, 20.0);
+        var route = new OptimizationRoute(List.of(
+                span(0, first, middle, 90, 3600, List.of()),
+                span(1, middle, second, 90, 3600, List.of()),
+                span(2, second, end, 150, 6000, List.of())));
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).extracting(stop -> stop.candidate().existingItemId())
+                .containsExactly("visit-1", "visit-2");
+        assertThat(result.finalSocPct()).isCloseTo(30, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
     void followingDaysAreReplayedAndUnsafePlansHaveNoApplicableOperations() {
         var routes = mock(RouteService.class);
         var finder = mock(RouteCorridorChargerFinder.class);
@@ -60,7 +137,9 @@ class EvRouteOptimizationServiceTests {
                     base.startingSocPct(), base.reserveSocPct(), base.targetSocPct(), base.maximumDetourKm(), List.of(),
                     List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(start, end))));
             var result = service.optimize(request);
-            assertThat(result.feasible()).as(id).isEqualTo(id.equals("near"));
+            // "far" only needs its own charger, which that day can plan next, so it warns rather than blocks.
+            assertThat(result.feasible()).as(id).isEqualTo(id.equals("near") || id.equals("far"));
+            assertThat(result.warnings().stream().anyMatch(warning -> warning.contains("later day"))).as(id).isEqualTo(!id.equals("near"));
             if (!result.feasible()) assertThat(result.operations()).isEmpty();
         }
     }
@@ -235,6 +314,199 @@ class EvRouteOptimizationServiceTests {
         assertThat(response.operations()).anySatisfy(operation -> {
             assertThat(operation.oldItemId()).isEqualTo("target-item");
                     assertThat(operation.departureSocPct()).isEqualTo(100);
+        });
+    }
+
+    @Test
+    void planningOneDayIsNotBlockedByALaterDayThatStillNeedsItsOwnCharger() {
+        // Each day needs a charger. Refusing day 1 because day 2 has none yet, while day 2 refuses
+        // because day 1 has none yet, would leave the traveller unable to plan either day.
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var nextStart = new EvRouteStopRequest("next-start", "Next start", 13, 103, null, false, null);
+        var far = new EvRouteStopRequest("far", "Far", 13, 104, null, false, null);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0,
+                List.of(), List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(nextStart, far))));
+
+        var response = optimize(request, charger("mid", 13, 101.4, 180, .9, false));
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).extracting(EvPlanOperation::type).containsExactly(EvPlanOperationType.ADD_CHARGER);
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("later day"));
+    }
+
+    @Test
+    void chargesLongerWhenThatIsWhatTheNextDayNeeds() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var nextStart = new EvRouteStopRequest("next-start", "Next start", 13, 103, null, false, null);
+        var nextEnd = new EvRouteStopRequest("next-end", "Next end", 13, 104, null, false, null);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0,
+                List.of(), List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(nextStart, nextEnd))));
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> to.startsWith("ev-verify-") ? 140 : from.startsWith("ev-verify-") ? 160 : to.equals("next-end") ? 60 : 300);
+        when(finder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(new OptimizationRouteSpan(
+                0, request.stops().getFirst(), request.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)),
+                List.of(candidate(charger("mid", 13, 101.4, 180, .9, false), 140, 1, null))))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations().getFirst().departureSocPct()).isEqualTo(85);
+        assertThat(response.warnings()).noneMatch(warning -> warning.contains("later day"));
+    }
+
+    @Test
+    void chargesLongerWhenTheRealRoadIsLongerThanTheCorridorEstimate() {
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        // The corridor estimates 161 km after the charger, but the road is 190 km.
+        stubRoads(routes, (from, to) -> to.startsWith("ev-verify-") ? 140 : from.startsWith("ev-verify-") ? 190 : 330);
+        when(finder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(new OptimizationRouteSpan(
+                0, request.stops().getFirst(), request.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)),
+                List.of(candidate(charger("mid", 13, 101.4, 180, .9, false), 140, 1, null))))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.finalSocPct()).isGreaterThanOrEqualTo(10);
+    }
+
+    @Test
+    void aKeptStopsSavedChargeCountsSoTheSearchDoesNotAddARedundantCharger() {
+        // The kept stop is already planned to leave at 90%, which reaches the destination.
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var origin = new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null);
+        var kept = new EvRouteStopRequest("kept", "Kept stop", 13, 101, charger("kept-station", 13, 101, 50, .9, false),
+                true, EvChargerSelectionSource.AUTO, null, null, 29, 28.8, 90.0);
+        var destination = new EvRouteStopRequest("destination", "Destination", 13, 103, null, false, null);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(origin, kept, destination), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> to.equals("kept") ? 90 : to.startsWith("ev-verify-") || from.startsWith("ev-verify-") ? 120 : 240);
+        when(finder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(
+                span(0, origin, kept, 90, 5_400, List.of()),
+                span(1, kept, destination, 240, 14_400, List.of(candidate(charger("fast", 13, 102, 180, .95, false), 120, 0, null))))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).extracting(EvPlanOperation::type).doesNotContain(EvPlanOperationType.ADD_CHARGER);
+        assertThat(response.finalSocPct()).isCloseTo(10, org.assertj.core.data.Offset.offset(1e-6));
+    }
+
+    @Test
+    void reportsAnUnchangedPlanAsAlreadyEfficientInsteadOfCountingRefreshesAsChanges() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var station = charger("saved-station", 13, 101.4, 180, .9, false);
+        var saved = new EvRouteStopRequest("saved", "Saved", 13, 101.4, station, false, EvChargerSelectionSource.AUTO, null, null, 15, 15.0, 70.0);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(base.stops().getFirst(), saved, base.stops().getLast()), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+
+        var response = optimize(request, candidate(station, 140, 1, "saved"));
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).extracting(EvPlanOperation::type).containsExactly(EvPlanOperationType.UPDATE_CHARGER);
+        assertThat(response.message()).isEqualTo("The current charging plan is already efficient.");
+    }
+
+    @Test
+    void twoUnlockedVisitsToOneStationStayTheirOwnStopsOnTheirOwnSpans() {
+        var station = charger("same-station", 13, 101, 180, .9, false);
+        var origin = new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null);
+        var outbound = new EvRouteStopRequest("visit-out", "Outbound", 13, 101, station, false, EvChargerSelectionSource.AUTO);
+        var far = new EvRouteStopRequest("far", "Far", 13, 102, null, false, null);
+        var inbound = new EvRouteStopRequest("visit-back", "Return", 13, 101, station, false, EvChargerSelectionSource.AUTO);
+        var home = new EvRouteStopRequest("home", "Home", 13, 100, null, false, null);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(origin, outbound, far, inbound, home), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var route = new OptimizationRoute(List.of(span(0, origin, far, 220, 7_200, List.of()), span(1, far, home, 220, 7_200, List.of())));
+
+        for (var found : List.of(List.of(station), List.<EvChargerResponse>of())) {
+            var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+            when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                    org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                    .thenReturn(new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(found, null));
+
+            var result = new RouteCorridorChargerFinder(service).populateCandidates(route, request, List.of(outbound, inbound));
+
+            assertThat(result.spans().get(0).candidates()).extracting(OptimizationChargerCandidate::existingItemId).containsExactly("visit-out");
+            assertThat(result.spans().get(1).candidates()).extracting(OptimizationChargerCandidate::existingItemId).containsExactly("visit-back");
+        }
+    }
+
+    @Test
+    void aSavedStopTheLiveSearchReportsClosedIsNotKeptFromItsSnapshot() {
+        var active = charger("station", 13, 101, 180, .9, false);
+        var closed = new EvChargerResponse(active.id(), active.name(), active.operatorName(), active.location(), active.address(), active.province(),
+                active.connectorTypes(), active.maxKw(), active.totalConnectors(), active.availableConnectors(), active.priceText(), active.openingHours(),
+                active.source(), active.verificationStatus(), EvChargerStatus.PERMANENTLY_CLOSED, active.ratingAvg(), active.ratingCount(), active.confidenceScore(), active.stale());
+        var saved = new EvRouteStopRequest("saved", "Saved", 13, 101, active, false, EvChargerSelectionSource.AUTO);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(base.stops().getFirst(), saved, base.stops().getLast()), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(List.of(closed), null));
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(), 300, 14_400, List.of())));
+
+        var result = new RouteCorridorChargerFinder(service).populateCandidates(route, request, List.of(saved));
+
+        assertThat(result.spans().getFirst().candidates()).isEmpty();
+    }
+
+    @Test
+    void corridorSearchFindsAChargerBetweenTwoSamplePointsInsideTheAllowedDetour() {
+        // 75 km along the route and 8 km to the side: inside a 20 km detour allowance.
+        var station = charger("between-anchors", 13.0719, 100.6923, 150, .9, false);
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenAnswer(call -> {
+                    double dLat = ((double) call.getArgument(0) - 13.0719) * 110.574;
+                    double dLng = ((double) call.getArgument(1) - 100.6923) * 108.34;
+                    boolean inRadius = Math.hypot(dLat, dLng) <= (double) call.getArgument(2);
+                    return new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(inRadius ? List.of(station) : List.of(), null);
+                });
+        var route = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 325, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)), List.of())));
+
+        var result = new RouteCorridorChargerFinder(service).populateCandidates(route, request, List.of());
+
+        assertThat(result.spans().getFirst().candidates()).extracting(candidate -> candidate.charger().id()).containsExactly("between-anchors");
+    }
+
+    @Test
+    void anOutageOfTheChargerSearchIsNotReportedAsARouteWithNoSafePlan() {
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var routes = mock(RouteService.class);
+        var chargers = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        stubRoadRoutes(routes);
+        when(chargers.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenThrow(new com.navio.mobilityandevservice.exception.ProviderUnavailableException("down", new RuntimeException("down")));
+
+        var response = new EvRouteOptimizationService(routes, new RouteCorridorChargerFinder(chargers), new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isFalse();
+        assertThat(response.message()).contains("Charger search");
+    }
+
+    private void stubRoads(RouteService service, java.util.function.ToLongBiFunction<String, String> kmBetween) {
+        when(service.computeDirections(any())).thenAnswer(invocation -> {
+            DirectionsRequest request = invocation.getArgument(0);
+            var group = request.groups().getFirst();
+            var legs = new ArrayList<RouteSegmentResponse>();
+            for (int i = 1; i < group.points().size(); i++) {
+                var from = group.points().get(i - 1);
+                var to = group.points().get(i);
+                long km = kmBetween.applyAsLong(from.id(), to.id());
+                legs.add(new RouteSegmentResponse("leg-" + i, group.blockId(), from.id(), to.id(), from.name(), to.name(),
+                        RouteSegmentStatus.ROUTED, null, km * 1000, km * 60, null));
+            }
+            return new DirectionsResponse(legs);
         });
     }
 

@@ -31,15 +31,17 @@ public class SocConstrainedRouteOptimizer {
     private static final double EPSILON = 1e-8;
     private static final int MAX_LABELS_PER_NODE = 256;
     private static final int MAX_EXPANSIONS_PER_SPAN = 100_000;
-    private static final int MAX_CHARGE_SOC_PCT = 92;
+    private static final int MAX_CHARGE_SOC_PCT = 95;
     private static final int CHARGE_BUCKET_SIZE_PCT = 5;
     private static final long CHARGING_STOP_OVERHEAD_SECONDS = 5 * 60L;
+    private static final int MAX_ALTERNATIVE_PLANS = 7;
+    static final String APPROXIMATE_DISTANCE_WARNING = "Distances are approximate until the selected stops are checked on the road route.";
 
     OptimizationSearchResult optimize(OptimizationRoute route, EvRouteOptimizationRequest request) {
         List<SearchLabel> labels = List.of(SearchLabel.start(request.startingSocPct()));
         List<String> warnings = new ArrayList<>();
-        if (route.spans().stream().anyMatch(span -> !"ROUTED".equals(span.distanceQuality()) || !span.candidates().isEmpty())) warnings.add("FALLBACK_DISTANCE: approximate distances or charger detours are used; final road verification is not included.");
-        if ("RATED_RANGE".equals(request.vehicle().resolvedModel().modelKind())) warnings.add("PROVISIONAL_RATED_RANGE: preview only; automatic charger application is not approved.");
+        if (route.spans().stream().anyMatch(span -> !"ROUTED".equals(span.distanceQuality()) || !span.candidates().isEmpty())) warnings.add(APPROXIMATE_DISTANCE_WARNING);
+        if ("RATED_RANGE".equals(request.vehicle().resolvedModel().modelKind())) warnings.add("Rated-range estimate: this is a preview only, so these charging stops can't be applied.");
 
         if (consumedSocPct(1, request.vehicle()) == null) return new OptimizationSearchResult(false, null, 0, 0, List.of(), List.of("Canonical SoC unavailable: suitable energy model and usable capacity are required."));
         for (OptimizationRouteSpan span : route.spans()) {
@@ -53,15 +55,31 @@ public class SocConstrainedRouteOptimizer {
             }
         }
 
-        SearchLabel best = labels.stream().min(Comparator.comparingDouble(SearchLabel::costSeconds)).orElseThrow();
-        return new OptimizationSearchResult(
-                true,
-                route.spans().isEmpty() || route.spans().getLast().to().observedSocPct() == null ? best.socPct() : route.spans().getLast().to().observedSocPct(),
-                best.drivingSeconds(),
-                best.chargingMinutes(),
-                best.chargeStops(),
-                warnings
-        );
+        List<SearchLabel> ranked = labels.stream().sorted(Comparator.comparingDouble(SearchLabel::costSeconds)).toList();
+        SearchLabel best = ranked.getFirst();
+        List<OptimizationSearchResult> alternatives = alternativesAfter(ranked).stream()
+                .filter(label -> label.socPct() > best.socPct() + EPSILON)
+                .map(label -> feasibleResult(route, label, warnings, List.of()))
+                .toList();
+        return feasibleResult(route, best, warnings, alternatives);
+    }
+
+    private static OptimizationSearchResult feasibleResult(OptimizationRoute route, SearchLabel label, List<String> warnings,
+                                                           List<OptimizationSearchResult> alternatives) {
+        Double observedAtEnd = route.spans().isEmpty() ? null : route.spans().getLast().to().observedSocPct();
+        return new OptimizationSearchResult(true, observedAtEnd == null ? label.socPct() : observedAtEnd,
+                label.drivingSeconds(), label.chargingMinutes(), label.chargeStops(), warnings, alternatives);
+    }
+
+    /** Each alternative costs road requests to verify, so sample the range, always keeping the fullest finish. */
+    private static List<SearchLabel> alternativesAfter(List<SearchLabel> ranked) {
+        List<SearchLabel> rest = ranked.subList(1, ranked.size());
+        if (rest.size() <= MAX_ALTERNATIVE_PLANS) return rest;
+        List<SearchLabel> sampled = new ArrayList<>(MAX_ALTERNATIVE_PLANS);
+        for (int index = 1; index <= MAX_ALTERNATIVE_PLANS; index++) {
+            sampled.add(rest.get(index * rest.size() / MAX_ALTERNATIVE_PLANS - 1));
+        }
+        return sampled;
     }
 
     private List<SearchLabel> optimizeSpan(
@@ -87,7 +105,7 @@ public class SocConstrainedRouteOptimizer {
             }
 
             RouteNode currentNode = nodes.get(nodeIndex);
-            for (DepartureOption departure : departureOptions(currentNode, currentLabel, request)) {
+            for (DepartureOption departure : departureOptions(span.index(), currentNode, currentLabel, request)) {
                 for (int nextIndex = nodeIndex + 1; nextIndex < nodes.size(); nextIndex++) {
                     RouteNode nextNode = nodes.get(nextIndex);
                     DriveEdge edge = driveEdge(span, currentNode, nextNode);
@@ -141,12 +159,13 @@ public class SocConstrainedRouteOptimizer {
         Set<String> visitedChargerIds = currentLabel.visitedChargerIds();
         double chargingCostSeconds = departure.chargeMinutes() * 60.0;
 
-        if (departure.chargeMinutes() > 0 && currentNode.candidate() != null) {
+        // A kept stop's saved charge happens anyway and the verifier replays it, so it needs no operation.
+        if (departure.chargeMinutes() > 0 && currentNode.candidate() != null && !departure.savedPlan()) {
             chargeStops = new ArrayList<>(currentLabel.chargeStops());
             chargeStops.add(new PlannedChargeStop(
                     span.index(),
                     currentNode.sequence(),
-                    span.to().itemId(),
+                    currentNode.sequence() == 0 ? null : span.to().itemId(),
                     currentNode.candidate(),
                     currentLabel.socPct(),
                     departure.socPct(),
@@ -154,7 +173,7 @@ public class SocConstrainedRouteOptimizer {
                     currentNode.candidate().deviationKm() * 2
             ));
             visitedChargerIds = new HashSet<>(currentLabel.visitedChargerIds());
-            visitedChargerIds.add(currentNode.candidate().charger().id());
+            visitedChargerIds.add(chargeVisitKey(span.index(), currentNode.candidate()));
             chargingCostSeconds += CHARGING_STOP_OVERHEAD_SECONDS + riskPenaltySeconds(currentNode.candidate().charger());
         }
 
@@ -169,16 +188,18 @@ public class SocConstrainedRouteOptimizer {
     }
 
     private List<DepartureOption> departureOptions(
+            int spanIndex,
             RouteNode node,
             SearchLabel label,
             EvRouteOptimizationRequest request
     ) {
         List<DepartureOption> options = new ArrayList<>();
-        options.add(new DepartureOption(label.socPct(), 0));
+        DepartureOption noCharge = new DepartureOption(label.socPct(), 0, false);
         OptimizationChargerCandidate candidate = node.candidate();
         if (candidate == null
-                || label.visitedChargerIds().contains(candidate.charger().id())
+                || label.visitedChargerIds().contains(chargeVisitKey(spanIndex, candidate))
                 || !compatible(candidate.charger(), request.vehicle())) {
+            options.add(noCharge);
             return options;
         }
 
@@ -191,18 +212,24 @@ public class SocConstrainedRouteOptimizer {
         if (stopTarget != null) {
             double departurePct = Math.max(label.socPct(), Math.min(100, Math.max(0, stopTarget)));
             Double minutes = chargeMinutes(label.socPct(), departurePct, candidate.charger(), request.vehicle());
-            return minutes == null ? List.of() : List.of(new DepartureOption(departurePct, minutes));
+            return minutes == null ? List.of() : List.of(new DepartureOption(departurePct, minutes, false));
         }
 
+        // Node 0 is a kept stop. Leaving it uncharged is not an option when its saved plan charges,
+        // because the verifier replays that plan; pretending otherwise adds chargers it makes redundant.
+        DepartureOption base = node.sequence() == 0 ? savedPlanOption(candidate, label, request, noCharge) : noCharge;
+        options.add(base);
+
         Set<Integer> targetSocValues = new LinkedHashSet<>();
-        targetSocValues.add((int) Math.round(request.targetSocPct()));
-        int firstBucket = roundUp(label.socPct() + EPSILON, CHARGE_BUCKET_SIZE_PCT);
+        int minimumTarget = (int) Math.ceil(request.targetSocPct());
+        targetSocValues.add(minimumTarget);
+        int firstBucket = roundUp(Math.max(base.socPct() + EPSILON, minimumTarget), CHARGE_BUCKET_SIZE_PCT);
         for (int target = firstBucket; target <= MAX_CHARGE_SOC_PCT; target += CHARGE_BUCKET_SIZE_PCT) {
             targetSocValues.add(target);
         }
         for (int targetSoc : targetSocValues) {
             int boundedTargetSoc = Math.min(MAX_CHARGE_SOC_PCT, targetSoc);
-            if (boundedTargetSoc <= label.socPct()) {
+            if (boundedTargetSoc <= base.socPct()) {
                 continue;
             }
             Double chargeMinutes = chargeMinutes(
@@ -212,10 +239,30 @@ public class SocConstrainedRouteOptimizer {
                     request.vehicle()
             );
             if (chargeMinutes != null && chargeMinutes > 0) {
-                options.add(new DepartureOption(boundedTargetSoc, chargeMinutes));
+                options.add(new DepartureOption(boundedTargetSoc, chargeMinutes, false));
             }
         }
         return options;
+    }
+
+    private static DepartureOption savedPlanOption(OptimizationChargerCandidate candidate, SearchLabel label,
+                                                   EvRouteOptimizationRequest request, DepartureOption noCharge) {
+        EvRouteStopRequest saved = request.stops().stream()
+                .filter(stop -> stop.itemId().equals(candidate.existingItemId()))
+                .findFirst().orElse(null);
+        if (saved == null || (saved.effectiveTargetSocPct() == null && saved.effectiveChargeMinutes() == null)) return noCharge;
+        var energy = CanonicalEnergy.calculate(new CanonicalEnergy.Input(request.vehicle().resolvedModel(), 0.0, "ROUTED", label.socPct(), null,
+                new CanonicalEnergy.Charging(saved.effectiveTargetSocPct(), saved.effectiveChargeMinutes(), true,
+                        effectivePowerKw(candidate.charger(), request.vehicle())), request.reserveSocPct()));
+        if (energy.departureSocPct() == null || energy.nominalChargeMinutes() == null || energy.nominalChargeMinutes() <= 0) return noCharge;
+        return new DepartureOption(energy.departureSocPct(), energy.nominalChargeMinutes(), true);
+    }
+
+    private static String chargeVisitKey(int spanIndex, OptimizationChargerCandidate candidate) {
+        // Saved itinerary items are unique visits. New stations may be visited again on
+        // a later span (for example on the return leg), but never twice within one span.
+        return candidate.existingItemId() != null ? "item:" + candidate.existingItemId()
+                : "span:" + spanIndex + ":station:" + candidate.charger().id();
     }
 
     private List<RouteNode> routeNodes(OptimizationRouteSpan span) {
@@ -303,7 +350,7 @@ public class SocConstrainedRouteOptimizer {
     private record DriveEdge(double distanceKm, long durationSeconds) {
     }
 
-    private record DepartureOption(double socPct, double chargeMinutes) {
+    private record DepartureOption(double socPct, double chargeMinutes, boolean savedPlan) {
     }
 
     private record NodeLabel(int nodeIndex, SearchLabel label) {

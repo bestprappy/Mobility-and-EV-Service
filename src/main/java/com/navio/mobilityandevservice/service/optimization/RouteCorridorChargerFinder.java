@@ -26,7 +26,9 @@ import java.util.concurrent.Future;
 public class RouteCorridorChargerFinder {
 
     private static final double SEARCH_RADIUS_KM = 15;
-    private static final double SAMPLE_INTERVAL_KM = 30;
+    // Search circles must overlap enough to cover the default 20 km detour (10 km either side of the
+    // road) between sample points: 2 * sqrt(15^2 - 10^2) is about 22 km.
+    private static final double SAMPLE_INTERVAL_KM = 20;
     private static final int MAX_SEARCH_ANCHORS = 48;
     private static final int MAX_CANDIDATES_PER_SPAN = 40;
     private static final double EARTH_RADIUS_KM = 6_371.0;
@@ -43,29 +45,40 @@ public class RouteCorridorChargerFinder {
             List<EvRouteStopRequest> replaceableStops
     ) {
         List<SearchAnchor> anchors = buildAnchors(route.spans());
-        Map<Integer, List<EvChargerResponse>> liveChargersBySpan = searchAnchors(anchors);
-        Set<String> seenLiveChargerIds = liveChargersBySpan.values().stream()
-                .flatMap(List::stream)
-                .map(EvChargerResponse::id)
-                .collect(HashSet::new, Set::add, Set::addAll);
-        Map<String, String> existingItemIdsByChargerId = replaceableStops.stream()
-                .filter(EvRouteStopRequest::chargerStop)
-                .collect(HashMap::new, (map, stop) -> map.put(stop.charger().id(), stop.itemId()), Map::putAll);
+        CorridorSearch search = searchAnchors(anchors);
+        Map<Integer, List<EvChargerResponse>> liveChargersBySpan = search.chargersBySpan();
+        Map<String, EvChargerResponse> liveChargersById = new HashMap<>();
+        liveChargersBySpan.values().forEach(chargers -> chargers.forEach(charger -> liveChargersById.put(charger.id(), charger)));
+        Map<String, Integer> spanByItemId = spansOfReplaceableStops(request);
+        Map<String, List<EvRouteStopRequest>> visitsByChargerId = new HashMap<>();
+        for (EvRouteStopRequest stop : replaceableStops) {
+            if (stop.chargerStop()) visitsByChargerId.computeIfAbsent(stop.charger().id(), ignored -> new ArrayList<>()).add(stop);
+        }
 
         List<OptimizationRouteSpan> populatedSpans = route.spans().stream()
                 .map(span -> span.withCandidates(mapLiveCandidates(
                         span,
                         liveChargersBySpan.getOrDefault(span.index(), List.of()),
-                        existingItemIdsByChargerId,
+                        visitsByChargerId,
+                        spanByItemId,
                         request
                 )))
                 .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
 
+        Set<String> placedItemIds = new HashSet<>();
+        populatedSpans.forEach(span -> span.candidates().forEach(candidate -> placedItemIds.add(candidate.existingItemId())));
         for (EvRouteStopRequest existingStop : replaceableStops) {
-            if (!existingStop.chargerStop() || seenLiveChargerIds.contains(existingStop.charger().id())) {
+            if (!existingStop.chargerStop() || placedItemIds.contains(existingStop.itemId())) {
                 continue;
             }
-            addSnapshotCandidate(populatedSpans, existingStop, request);
+            EvChargerResponse live = liveChargersById.get(existingStop.charger().id());
+            // The live answer outranks the saved snapshot: a closed station must not be kept from memory.
+            if (live != null && !isUsable(live, request)) {
+                continue;
+            }
+            boolean repeatVisit = visitsByChargerId.get(existingStop.charger().id()).size() > 1;
+            addSnapshotCandidate(populatedSpans, existingStop, live != null ? live : existingStop.charger(),
+                    repeatVisit ? spanByItemId.get(existingStop.itemId()) : null, request);
         }
 
         List<OptimizationRouteSpan> sortedSpans = populatedSpans.stream()
@@ -73,7 +86,32 @@ public class RouteCorridorChargerFinder {
                         .sorted(Comparator.comparingDouble(OptimizationChargerCandidate::progressKm))
                         .toList()))
                 .toList();
-        return new OptimizationRoute(sortedSpans);
+        return new OptimizationRoute(sortedSpans, search.failedSearches());
+    }
+
+    /** Which leg between kept stops each movable charger currently sits on. */
+    private Map<String, Integer> spansOfReplaceableStops(EvRouteOptimizationRequest request) {
+        Map<String, Integer> spans = new HashMap<>();
+        int mandatoryIndex = -1;
+        for (EvRouteStopRequest stop : request.stops()) {
+            if (!stop.chargerStop() || stop.effectiveLocked()) mandatoryIndex++;
+            else spans.put(stop.itemId(), Math.max(0, mandatoryIndex));
+        }
+        return spans;
+    }
+
+    /**
+     * The saved stop a live charger stands for on this span. A station visited once may be planned on
+     * any span, but with repeat visits each stop keeps its own leg, or one would absorb the other.
+     */
+    private String existingItemId(int spanIndex, String chargerId, Map<String, List<EvRouteStopRequest>> visitsByChargerId,
+                                  Map<String, Integer> spanByItemId) {
+        List<EvRouteStopRequest> visits = visitsByChargerId.getOrDefault(chargerId, List.of());
+        if (visits.size() == 1) return visits.getFirst().itemId();
+        return visits.stream()
+                .map(EvRouteStopRequest::itemId)
+                .filter(itemId -> Integer.valueOf(spanIndex).equals(spanByItemId.get(itemId)))
+                .findFirst().orElse(null);
     }
 
     /**
@@ -135,7 +173,8 @@ public class RouteCorridorChargerFinder {
     private List<OptimizationChargerCandidate> mapLiveCandidates(
             OptimizationRouteSpan span,
             List<EvChargerResponse> chargers,
-            Map<String, String> existingItemIdsByChargerId,
+            Map<String, List<EvRouteStopRequest>> visitsByChargerId,
+            Map<String, Integer> spanByItemId,
             EvRouteOptimizationRequest request
     ) {
         Map<String, OptimizationChargerCandidate> candidatesById = new LinkedHashMap<>();
@@ -144,14 +183,14 @@ public class RouteCorridorChargerFinder {
                 continue;
             }
             RouteProjection projection = project(span, charger.location().lat(), charger.location().lng());
-            if (!withinCorridor(span, projection, request.maximumDetourKm())) {
+            if (!withinCorridor(projection, request.maximumDetourKm())) {
                 continue;
             }
             OptimizationChargerCandidate candidate = new OptimizationChargerCandidate(
                     charger,
                     projection.progressKm(),
                     projection.deviationKm(),
-                    existingItemIdsByChargerId.get(charger.id())
+                    existingItemId(span.index(), charger.id(), visitsByChargerId, spanByItemId)
             );
             candidatesById.merge(
                     charger.id(),
@@ -165,23 +204,26 @@ public class RouteCorridorChargerFinder {
     private void addSnapshotCandidate(
             List<OptimizationRouteSpan> spans,
             EvRouteStopRequest existingStop,
+            EvChargerResponse charger,
+            Integer onlySpanIndex,
             EvRouteOptimizationRequest request
     ) {
-        if (!isUsable(existingStop.charger(), request)) {
+        if (!isUsable(charger, request)) {
             return;
         }
         ProjectedSpan best = spans.stream()
+                .filter(span -> onlySpanIndex == null || span.index() == onlySpanIndex)
                 .map(span -> new ProjectedSpan(span, project(span, existingStop.lat(), existingStop.lng())))
                 .min(Comparator.comparingDouble(value -> value.projection().deviationKm()))
                 .orElse(null);
-        if (best == null || !withinCorridor(best.span(), best.projection(), request.maximumDetourKm())) {
+        if (best == null || !withinCorridor(best.projection(), request.maximumDetourKm())) {
             return;
         }
 
         int spanListIndex = spans.indexOf(best.span());
         List<OptimizationChargerCandidate> nextCandidates = new ArrayList<>(best.span().candidates());
         nextCandidates.add(new OptimizationChargerCandidate(
-                existingStop.charger(),
+                charger,
                 best.projection().progressKm(),
                 best.projection().deviationKm(),
                 existingStop.itemId()
@@ -196,34 +238,38 @@ public class RouteCorridorChargerFinder {
     }
 
     private boolean withinCorridor(
-            OptimizationRouteSpan span,
             RouteProjection projection,
             double maximumDetourKm
     ) {
-        double progressRatio = span.distanceKm() <= 0 ? 0 : projection.progressKm() / span.distanceKm();
-        return progressRatio > 0.01
-                && progressRatio < 0.99
-                && projection.deviationKm() * 2 <= maximumDetourKm;
+        // Projection is already clamped to the span. Chargers at either endpoint may be
+        // essential when departing with little charge or protecting the next day's reserve.
+        // The final route verifier still checks actual driving distance and arrival energy.
+        return projection.deviationKm() * 2 <= maximumDetourKm;
     }
 
-    private Map<Integer, List<EvChargerResponse>> searchAnchors(List<SearchAnchor> anchors) {
+    private CorridorSearch searchAnchors(List<SearchAnchor> anchors) {
         Map<Integer, List<EvChargerResponse>> chargersBySpan = new HashMap<>();
+        int failedSearches = 0;
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             List<Future<AnchorSearchResult>> futures = limitAnchors(anchors).stream()
                     .map(anchor -> executor.submit(() -> searchAnchor(anchor)))
                     .toList();
             for (Future<AnchorSearchResult> future : futures) {
                 AnchorSearchResult result = future.get();
+                if (result.failed()) failedSearches++;
                 chargersBySpan.computeIfAbsent(result.spanIndex(), ignored -> new ArrayList<>())
                         .addAll(result.chargers());
             }
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
+            failedSearches++;
             log.warn("EV route corridor search was interrupted", exception);
         } catch (ExecutionException exception) {
+            failedSearches++;
             log.warn("One EV route corridor search failed", exception.getCause());
         }
-        return chargersBySpan;
+        if (failedSearches > 0) log.warn("{} of {} EV route corridor searches failed", failedSearches, limitAnchors(anchors).size());
+        return new CorridorSearch(chargersBySpan, failedSearches);
     }
 
     private AnchorSearchResult searchAnchor(SearchAnchor anchor) {
@@ -237,7 +283,8 @@ public class RouteCorridorChargerFinder {
                             null,
                             null,
                             false
-                    ).items()
+                    ).items(),
+                    false
             );
         } catch (RuntimeException exception) {
             log.debug(
@@ -247,7 +294,7 @@ public class RouteCorridorChargerFinder {
                     anchor.lng(),
                     exception
             );
-            return new AnchorSearchResult(anchor.spanIndex(), List.of());
+            return new AnchorSearchResult(anchor.spanIndex(), List.of(), true);
         }
     }
 
@@ -355,7 +402,10 @@ public class RouteCorridorChargerFinder {
     private record SearchAnchor(int spanIndex, double lat, double lng) {
     }
 
-    private record AnchorSearchResult(int spanIndex, List<EvChargerResponse> chargers) {
+    private record AnchorSearchResult(int spanIndex, List<EvChargerResponse> chargers, boolean failed) {
+    }
+
+    private record CorridorSearch(Map<Integer, List<EvChargerResponse>> chargersBySpan, int failedSearches) {
     }
 
     private record RouteProjection(double progressKm, double deviationKm) {

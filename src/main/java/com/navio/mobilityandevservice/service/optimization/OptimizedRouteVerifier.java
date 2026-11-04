@@ -115,9 +115,9 @@ final class OptimizedRouteVerifier {
         }
         if (soc + 1e-9 < request.reserveSocPct()) return failure("The final observed battery state is below the selected reserve; review the final stop before applying a charging plan.");
         List<String> warnings = new ArrayList<>(search.warnings());
-        warnings.removeIf(warning -> warning.startsWith("FALLBACK_DISTANCE:"));
-        warnings.add("Verified using " + CanonicalEnergy.VERSION + ": nominal energy; reserve is separate. Rated-range results remain preview-only.");
-        warnings.add("The selected stops were checked on road routes. Search uses a limited charger corridor and 5% charging targets; a global minimum travel time is not guaranteed. Allow 5 extra minutes per charging stop to connect.");
+        warnings.remove(SocConstrainedRouteOptimizer.APPROXIMATE_DISTANCE_WARNING);
+        warnings.add("Battery figures are nominal estimates, and your arrival reserve is kept separately.");
+        warnings.add("The selected stops were checked on road routes. Search uses a limited charger corridor and 5% charging targets, so a faster plan may exist. Allow 5 extra minutes per charging stop to connect.");
         if (availabilityUnconfirmed) {
             warnings.add("Charger availability is unknown, stale or currently busy; route feasibility does not confirm a free working connector on arrival.");
         }

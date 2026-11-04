@@ -6,7 +6,10 @@ import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 
 import java.util.List;
 
-record OptimizationRoute(List<OptimizationRouteSpan> spans) {
+record OptimizationRoute(List<OptimizationRouteSpan> spans, int failedChargerSearches) {
+    OptimizationRoute(List<OptimizationRouteSpan> spans) {
+        this(spans, 0);
+    }
     OptimizationRoute {
         spans = List.copyOf(spans);
     }
@@ -70,10 +73,17 @@ record OptimizationSearchResult(
         long totalDrivingSeconds,
         double totalChargingMinutes,
         List<PlannedChargeStop> chargeStops,
-        List<String> warnings
+        List<String> warnings,
+        /** Plans that charge more and cost more time, cheapest first, for when this one does not hold up. */
+        List<OptimizationSearchResult> costlierAlternatives
 ) {
+    OptimizationSearchResult(boolean feasible, Double finalSocPct, long totalDrivingSeconds, double totalChargingMinutes,
+                             List<PlannedChargeStop> chargeStops, List<String> warnings) {
+        this(feasible, finalSocPct, totalDrivingSeconds, totalChargingMinutes, chargeStops, warnings, List.of());
+    }
     OptimizationSearchResult {
         chargeStops = List.copyOf(chargeStops);
         warnings = List.copyOf(warnings);
+        costlierAlternatives = List.copyOf(costlierAlternatives);
     }
 }
