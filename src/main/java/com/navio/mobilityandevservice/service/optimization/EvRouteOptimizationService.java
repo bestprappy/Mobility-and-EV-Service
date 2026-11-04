@@ -58,7 +58,7 @@ public class EvRouteOptimizationService {
         }
         return optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
                 preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()),
-                request.followingDays());
+                request.followingDays(), request.precedingDays().size() + 1);
     }
 
     /** Replays the later days from where and with what the selected day ends. */
@@ -72,8 +72,16 @@ public class EvRouteOptimizationService {
         replay.add(new EvRouteOptimizationRequest.Day(request.blockId(), List.of(boundary)));
         replay.addAll(followingDays);
         var end = replay.stream().filter(day -> !day.stops().isEmpty()).reduce((a, b) -> b).orElseThrow().stops().getLast();
-        return PrecedingTripEnergy.resolve(new EvRouteOptimizationRequest(request.blockId(), List.of(end), request.vehicle(),
+        return PrecedingTripEnergy.resolveLaterDays(new EvRouteOptimizationRequest(request.blockId(), List.of(end), request.vehicle(),
                 plan.finalSocPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), replay), routeService);
+    }
+
+    /** Replay index 0 is the selected day's end, so an index counts forward from the selected day. */
+    private static List<String> uncheckedDayWarning(PrecedingTripEnergy.State later, int selectedDayNumber, int followingDayCount) {
+        if (later.uncheckedDayIndex() == null) return List.of();
+        int index = later.uncheckedDayIndex();
+        return List.of("Day " + (selectedDayNumber + index) + " doesn't start where the day before it ends, so its charge wasn't checked."
+                + (index < followingDayCount ? " Later days weren't checked either." : ""));
     }
 
     private EvRouteStopRequest protectEndpoint(EvRouteStopRequest stop) {
@@ -85,7 +93,8 @@ public class EvRouteOptimizationService {
     }
 
     private EvRouteOptimizationResponse optimizeDay(EvRouteOptimizationRequest request,
-                                                    List<EvRouteOptimizationRequest.Day> followingDays) {
+                                                    List<EvRouteOptimizationRequest.Day> followingDays,
+                                                    int selectedDayNumber) {
         List<EvRouteStopRequest> mandatoryStops = request.stops().stream()
                 .filter(stop -> !stop.chargerStop() || stop.effectiveLocked())
                 .toList();
@@ -121,6 +130,7 @@ public class EvRouteOptimizationService {
         plans.addAll(search.costlierAlternatives());
         OptimizationSearchResult firstRejected = null;
         OptimizationSearchResult withShortfallLater = null;
+        List<String> shortfallUncheckedWarning = List.of();
         for (OptimizationSearchResult plan : plans) {
             OptimizationSearchResult verified = OptimizedRouteVerifier.verify(routeWithCandidates, request, plan, routeService);
             if (!verified.feasible()) {
@@ -128,19 +138,24 @@ public class EvRouteOptimizationService {
                 continue;
             }
             var later = laterDays(request, verified, followingDays);
-            if (later.failure() == null) return feasible(request, routeWithCandidates, verified, List.of());
+            List<String> unchecked = uncheckedDayWarning(later, selectedDayNumber, followingDays.size());
+            if (later.failure() == null) return feasible(request, routeWithCandidates, verified, unchecked);
             if (!later.batteryShortfall()) {
                 // A gap, unknown route or low observed reading on a later day is not fixed by charging more today.
                 String message = "The proposed plan leaves a later day unavailable, disconnected or below reserve. Review the later itinerary before applying.";
                 return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), verified.finalSocPct(),
                         verified.totalDrivingSeconds(), verified.totalChargingMinutes(), message, List.of(message, later.failure()));
             }
-            if (withShortfallLater == null) withShortfallLater = verified;
+            if (withShortfallLater == null) {
+                withShortfallLater = verified;
+                shortfallUncheckedWarning = unchecked;
+            }
         }
         if (withShortfallLater != null) {
             // Days plan in order. Refusing here would deadlock: the later day refuses until this one is safe.
-            return feasible(request, routeWithCandidates, withShortfallLater,
-                    List.of("A later day still runs short of battery with this plan. Plan charging for that day next."));
+            List<String> extra = new ArrayList<>(List.of("A later day still runs short of battery with this plan. Plan charging for that day next."));
+            extra.addAll(shortfallUncheckedWarning);
+            return feasible(request, routeWithCandidates, withShortfallLater, extra);
         }
         return infeasible(request, routeWithCandidates, firstRejected);
     }

@@ -61,6 +61,37 @@ class PrecedingTripEnergyTests {
         var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",101,null)))));
         assertThat(PrecedingTripEnergy.resolve(request, routes(10000, RouteSegmentStatus.ROUTED)).failure()).contains("different location");
     }
+    private EvRouteOptimizationRequest selectedDayStartingAt(EvRouteStopRequest first, double startingSoc, List<EvRouteOptimizationRequest.Day> days) {
+        return new EvRouteOptimizationRequest("day-3", List.of(first, stop("f", 103, null)), vehicle, startingSoc, 12.0, 70.0, 20.0, days);
+    }
+    @Test void aReadingAtTheFirstStopGivesADisconnectedDayItsStartingCharge() {
+        var request = selectedDayStartingAt(stop("e", 102, 55.0), 100.0,
+                List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",101,null)))));
+        var state = PrecedingTripEnergy.resolve(request, routes(10000, RouteSegmentStatus.ROUTED));
+        assertThat(state.failure()).isNull();
+        assertThat(state.socPct()).isEqualTo(55);
+    }
+    @Test void batteryNeverCarriesAcrossAGapWithoutAReading() {
+        var state = PrecedingTripEnergy.resolve(selectedDayStartingAt(stop("e", 102, null), 100.0,
+                List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",101,null))))), routes(10000, RouteSegmentStatus.ROUTED));
+        assertThat(state.socPct()).isNull();
+        assertThat(state.failure()).contains("different location").contains("battery");
+    }
+    @Test void aShortfallBeforeTheGapDoesNotBlockADayWithItsOwnReading() {
+        // Battery cannot cross the gap, so the earlier day's shortfall has no bearing on this one.
+        var state = PrecedingTripEnergy.resolve(selectedDayStartingAt(stop("e", 102, 55.0), 15.0,
+                List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",101,null))))), routes(300000, RouteSegmentStatus.ROUTED));
+        assertThat(state.failure()).isNull();
+        assertThat(state.socPct()).isEqualTo(55);
+    }
+    @Test void aReadingRestartsReplayAtAnEarlierDisconnectedDay() {
+        var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",101,null))),
+                new EvRouteOptimizationRequest.Day("day-2", List.of(stop("c",105,60.0), stop("d",102,null)))));
+        // day-2 ends at 102 where day-3 starts, after a 25 km leg (10%) from the 60% reading.
+        var state = PrecedingTripEnergy.resolve(request, routes(25000, RouteSegmentStatus.ROUTED));
+        assertThat(state.failure()).isNull();
+        assertThat(state.socPct()).isEqualTo(50);
+    }
     @Test void firstDayUsesTripStartingBatteryWithoutFetchingEarlierRoutes() {
         var routes = mock(RouteService.class);
         assertThat(PrecedingTripEnergy.resolve(request(List.of()), routes).socPct()).isEqualTo(100);

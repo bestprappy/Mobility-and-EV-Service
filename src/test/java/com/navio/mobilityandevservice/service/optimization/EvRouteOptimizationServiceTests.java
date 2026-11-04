@@ -138,8 +138,11 @@ class EvRouteOptimizationServiceTests {
                     List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(start, end))));
             var result = service.optimize(request);
             // "far" only needs its own charger, which that day can plan next, so it warns rather than blocks.
-            assertThat(result.feasible()).as(id).isEqualTo(id.equals("near") || id.equals("far"));
-            assertThat(result.warnings().stream().anyMatch(warning -> warning.contains("later day"))).as(id).isEqualTo(!id.equals("near"));
+            // "disconnected" changed on purpose from blocking: no battery can cross the gap, so the block
+            // protected nothing. It warns that the day was not checked instead of implying it was.
+            assertThat(result.feasible()).as(id).isEqualTo(!id.equals("observed-low"));
+            assertThat(result.warnings().stream().anyMatch(warning -> warning.contains("later day"))).as(id).isEqualTo(id.equals("far") || id.equals("observed-low"));
+            assertThat(result.warnings().stream().anyMatch(warning -> warning.contains("wasn't checked"))).as(id).isEqualTo(id.equals("disconnected"));
             if (!result.feasible()) assertThat(result.operations()).isEmpty();
         }
     }
@@ -332,6 +335,52 @@ class EvRouteOptimizationServiceTests {
         assertThat(response.feasible()).isTrue();
         assertThat(response.operations()).extracting(EvPlanOperation::type).containsExactly(EvPlanOperationType.ADD_CHARGER);
         assertThat(response.warnings()).anyMatch(warning -> warning.contains("later day"));
+    }
+
+    @Test
+    void aDisconnectedLaterDayIsNamedAsUncheckedAndLaterDaysAreIncluded() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> 30);
+        when(finder.populateCandidates(any(), any(), any())).thenAnswer(call -> call.getArgument(0));
+        var away = new EvRouteStopRequest("away", "Away", 13, 110, null, false, null);
+        var awayEnd = new EvRouteStopRequest("away-end", "Away end", 13, 111, null, false, null);
+        var after = new EvRouteStopRequest("after", "After", 13, 111, null, false, null);
+        var afterEnd = new EvRouteStopRequest("after-end", "After end", 13, 112, null, false, null);
+        var earlier = new EvRouteOptimizationRequest.Day("day-1", List.of(
+                new EvRouteStopRequest("before", "Before", 13, 99, null, false, null), base.stops().getFirst()));
+        var request = new EvRouteOptimizationRequest("day-2",
+                List.of(new EvRouteStopRequest("origin", "Origin", 13, 100, null, false, null),
+                        new EvRouteStopRequest("midpoint", "Midpoint", 13, 101, null, false, null)),
+                base.vehicle(), 100.0, 10.0, 70.0, 20.0, List.of(earlier),
+                List.of(new EvRouteOptimizationRequest.Day("day-3", List.of(away, awayEnd)),
+                        new EvRouteOptimizationRequest.Day("day-4", List.of(after, afterEnd))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        // Day 3 of the trip, counting the earlier day and the selected one, and nothing after it is claimed.
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("Day 3") && warning.contains("wasn't checked")
+                && warning.contains("Later days"));
+    }
+
+    @Test
+    void aDisconnectedLaterDayWithItsOwnReadingIsIndependentAndNeedsNoWarning() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> 30);
+        when(finder.populateCandidates(any(), any(), any())).thenAnswer(call -> call.getArgument(0));
+        var away = new EvRouteStopRequest("away", "Away", 13, 110, null, false, null, null, 60.0);
+        var awayEnd = new EvRouteStopRequest("away-end", "Away end", 13, 111, null, false, null);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0,
+                List.of(), List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(away, awayEnd))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.warnings()).noneMatch(warning -> warning.contains("wasn't checked"));
     }
 
     @Test

@@ -16,17 +16,48 @@ final class PrecedingTripEnergy {
     private static final Set<EvConnectorType> DC = Set.of(EvConnectorType.CCS1, EvConnectorType.CCS2,
             EvConnectorType.CHADEMO, EvConnectorType.NACS, EvConnectorType.GB_T);
     /** {@code batteryShortfall}: the itinerary is known and connected, it just needs more charge to complete. */
-    record State(Double socPct, String failure, boolean batteryShortfall) {}
+    record State(Double socPct, String failure, boolean batteryShortfall, Integer uncheckedDayIndex) {
+        State(Double socPct, String failure, boolean batteryShortfall) { this(socPct, failure, batteryShortfall, null); }
+    }
     private PrecedingTripEnergy() {}
 
+    /** The battery the selected day starts with. Across a gap only a reading can supply it. */
     static State resolve(EvRouteOptimizationRequest request, RouteService routes) {
+        return replay(request, routes, false);
+    }
+
+    /**
+     * Looks ahead from the selected day's end, which only reaches as far as the battery can travel: at a
+     * gap the plan has no further effect, so the replay stops and reports that day as unchecked.
+     */
+    static State resolveLaterDays(EvRouteOptimizationRequest request, RouteService routes) {
+        return replay(request, routes, true);
+    }
+
+    private static State replay(EvRouteOptimizationRequest request, RouteService routes, boolean stopAtGap) {
         Double forward = request.startingSocPct();
         EvRouteStopRequest previous = null;
         boolean uncertainOrInfeasible = false;
         boolean belowReserve = false;
         boolean shortfall = false;
         boolean unknownFirst = false;
-        for (var day : request.precedingDays()) {
+        boolean stoppedAtGap = false;
+        Integer uncheckedDayIndex = null;
+        for (int dayIndex = 0; dayIndex < request.precedingDays().size() && !stoppedAtGap; dayIndex++) {
+            var day = request.precedingDays().get(dayIndex);
+            boolean gap = previous != null && !day.stops().isEmpty() && !samePosition(previous, day.stops().getFirst());
+            if (gap && stopAtGap) {
+                stoppedAtGap = true;
+                // A day with its own reading stands alone, so there is nothing left unchecked to report.
+                if (day.stops().getFirst().observedSocPct() == null) uncheckedDayIndex = dayIndex;
+                continue;
+            }
+            boolean restartsFromReading = gap && day.stops().getFirst().observedSocPct() != null;
+            if (restartsFromReading) {
+                // Nothing before the gap reaches this battery, including an earlier day's shortfall.
+                forward = day.stops().getFirst().observedSocPct();
+                uncertainOrInfeasible = belowReserve = shortfall = unknownFirst = false;
+            }
             List<RouteSegmentResponse> segments = day.stops().size() < 2 ? List.of()
                     : routes.computeDirections(new DirectionsRequest(RouteProfile.DRIVING_TRAFFIC,
                     List.of(new RoutePointGroupRequest(day.blockId(), day.stops().stream()
@@ -35,7 +66,7 @@ final class PrecedingTripEnergy {
                 var stop = day.stops().get(i);
                 Double km = null;
                 if (i == 0) {
-                    if (previous == null || samePosition(previous, stop)) km = 0.0;
+                    if (previous == null || samePosition(previous, stop) || restartsFromReading) km = 0.0;
                 } else {
                     String from = day.stops().get(i - 1).itemId();
                     var matches = segments.stream().filter(s -> day.blockId().equals(s.blockId())
@@ -61,14 +92,16 @@ final class PrecedingTripEnergy {
                 previous = stop;
             }
         }
-        if (previous != null && !request.stops().isEmpty() && !samePosition(previous, request.stops().getFirst())) {
-            return new State(null, "The selected day starts at a different location from the preceding day. Connect the itinerary before optimizing.", false);
+        if (!stoppedAtGap && previous != null && !request.stops().isEmpty() && !samePosition(previous, request.stops().getFirst())) {
+            Double reading = request.stops().getFirst().observedSocPct();
+            if (reading != null) return new State(reading, null, false);
+            return new State(null, "The selected day starts at a different location from the preceding day, so its starting battery is unknown. Set where it starts, or record the battery level at its first stop, before optimizing.", false);
         }
         if (uncertainOrInfeasible || forward == null) {
-            return new State(null, "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.", shortfall);
+            return new State(null, "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.", shortfall, uncheckedDayIndex);
         }
-        if (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct())) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.", shortfall);
-        return new State(forward, null, false);
+        if (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct())) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.", shortfall, uncheckedDayIndex);
+        return new State(forward, null, false, uncheckedDayIndex);
     }
 
     private static RoutePointRequest point(EvRouteStopRequest stop) {
