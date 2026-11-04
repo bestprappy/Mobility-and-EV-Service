@@ -34,18 +34,80 @@ public class EvRouteOptimizationService {
     private final RouteService routeService;
     private final RouteCorridorChargerFinder chargerFinder;
     private final SocConstrainedRouteOptimizer routeOptimizer;
+    private final SavedChargerRevalidator revalidator;
 
-    public EvRouteOptimizationService(
+    EvRouteOptimizationService(
             RouteService routeService,
             RouteCorridorChargerFinder chargerFinder,
             SocConstrainedRouteOptimizer routeOptimizer
     ) {
+        this(routeService, chargerFinder, routeOptimizer, SavedChargerRevalidator.none());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public EvRouteOptimizationService(
+            RouteService routeService,
+            RouteCorridorChargerFinder chargerFinder,
+            SocConstrainedRouteOptimizer routeOptimizer,
+            SavedChargerRevalidator revalidator
+    ) {
         this.routeService = routeService;
         this.chargerFinder = chargerFinder;
         this.routeOptimizer = routeOptimizer;
+        this.revalidator = revalidator;
     }
 
-    public EvRouteOptimizationResponse optimize(EvRouteOptimizationRequest request) {
+    public EvRouteOptimizationResponse optimize(EvRouteOptimizationRequest original) {
+        var checked = revalidator.check(original);
+        var request = checked.request();
+        var mustFix = closedStopThatBlocks(checked.closed(), request);
+        if (mustFix != null) {
+            return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), null, 0, 0, mustFix, List.of(mustFix));
+        }
+        var response = optimizeChecked(request);
+        List<String> notes = stationNotes(checked);
+        if (notes.isEmpty()) return response;
+        List<String> warnings = new ArrayList<>(response.warnings());
+        warnings.addAll(notes);
+        return new EvRouteOptimizationResponse(response.blockId(), response.feasible(), response.operations(), response.finalSocPct(),
+                response.totalDrivingSeconds(), response.totalChargingMinutes(), response.message(), warnings);
+    }
+
+    /**
+     * Earlier days set this day's battery, and a pinned stop or day boundary is the traveller's to change.
+     * Neither is moved or dropped silently: the plan stops and says which one.
+     */
+    private String closedStopThatBlocks(List<SavedChargerRevalidator.ClosedStop> closed, EvRouteOptimizationRequest request) {
+        for (var stop : closed) {
+            if (!stop.selectedDay() && stop.dayNumber() <= request.precedingDays().size()) {
+                return stop.name() + " on Day " + stop.dayNumber() + " is reported " + stop.statusText() + ". Replace it on that day, then plan this one.";
+            }
+        }
+        for (var stop : closed) {
+            boolean boundary = stop.stop().itemId().equals(request.stops().getFirst().itemId())
+                    || stop.stop().itemId().equals(request.stops().getLast().itemId());
+            if (stop.selectedDay() && (stop.stop().effectiveLocked() || boundary)) {
+                return stop.name() + " is reported " + stop.statusText() + ". Replace or remove it, then plan again.";
+            }
+        }
+        return null;
+    }
+
+    private List<String> stationNotes(SavedChargerRevalidator.Outcome checked) {
+        List<String> notes = new ArrayList<>();
+        for (var stop : checked.closed()) {
+            notes.add(stop.selectedDay()
+                    ? stop.name() + " is reported " + stop.statusText() + ", so this plan doesn't charge there."
+                    : stop.name() + " on Day " + stop.dayNumber() + " is reported " + stop.statusText() + ". Replace it when you plan that day.");
+        }
+        if (checked.uncheckedStations() > 0) {
+            notes.add(checked.uncheckedStations() + " saved charging " + (checked.uncheckedStations() == 1 ? "stop" : "stops")
+                    + " couldn't be re-checked, so "  + (checked.uncheckedStations() == 1 ? "its" : "their") + " status and speed are from when it was saved.");
+        }
+        return notes;
+    }
+
+    private EvRouteOptimizationResponse optimizeChecked(EvRouteOptimizationRequest request) {
         var preceding = PrecedingTripEnergy.resolve(request, routeService);
         if (preceding.failure() != null) {
             return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), null, 0, 0,

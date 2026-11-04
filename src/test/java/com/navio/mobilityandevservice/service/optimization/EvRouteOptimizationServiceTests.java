@@ -215,15 +215,11 @@ class EvRouteOptimizationServiceTests {
     void chargesAtAcSpeedWhenTheVehicleCannotUseTheStationsDcConnector() {
         EvRouteOptimizationRequest request = requestWithVehicleConnectors(EvConnectorType.TYPE2);
         // 180 kW station, but the only shared connector is Type 2, so the car is limited to 11 kW AC.
-        EvChargerResponse dualStandardCharger = charger(
-                "dual",
-                13,
-                101.4,
-                180,
-                0.95,
-                false,
-                List.of(EvConnectorType.CCS2, EvConnectorType.TYPE2)
-        );
+        EvChargerResponse dualPlain = charger("dual", 13, 101.4, 180, 0.95, false, List.of(EvConnectorType.CCS2, EvConnectorType.TYPE2));
+        EvChargerResponse dualStandardCharger = new EvChargerResponse(dualPlain.id(), dualPlain.name(), dualPlain.operatorName(), dualPlain.location(),
+                dualPlain.address(), dualPlain.province(), dualPlain.connectorTypes(), dualPlain.maxKw(), dualPlain.totalConnectors(), dualPlain.availableConnectors(),
+                dualPlain.priceText(), dualPlain.openingHours(), dualPlain.source(), dualPlain.verificationStatus(), dualPlain.status(), dualPlain.ratingAvg(),
+                dualPlain.ratingCount(), dualPlain.confidenceScore(), dualPlain.stale(), java.util.Map.of(EvConnectorType.CCS2, 180.0, EvConnectorType.TYPE2, 22.0), null);
 
         var response = optimize(request, dualStandardCharger);
 
@@ -753,6 +749,185 @@ class EvRouteOptimizationServiceTests {
         });
         var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
         assertThat(response.warnings()).anyMatch(warning -> warning.contains("long route"));
+    }
+
+    private EvChargerResponse withStatus(EvChargerResponse charger, EvChargerStatus status) {
+        return new EvChargerResponse(charger.id(), charger.name(), charger.operatorName(), charger.location(), charger.address(), charger.province(),
+                charger.connectorTypes(), charger.maxKw(), charger.totalConnectors(), charger.availableConnectors(), charger.priceText(), charger.openingHours(),
+                "GOOGLE_PLACES", "GOOGLE_CACHED", status, charger.ratingAvg(), charger.ratingCount(), charger.confidenceScore(), false,
+                charger.connectorPowerKw(), java.time.Instant.parse("2026-11-04T09:00:00Z"));
+    }
+
+    private EvRouteOptimizationResponse optimizeWithLiveStations(EvRouteOptimizationRequest request, OptimizationRoute route,
+                                                                 com.navio.mobilityandevservice.service.EvChargerService live) {
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoadRoutes(routes);
+        when(finder.populateCandidates(any(), any(), any())).thenReturn(route);
+        return new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer(), new SavedChargerRevalidator(live)).optimize(request);
+    }
+
+    @Test
+    void aPinnedStopThatHasClosedStopsThePlanAndIsNamedWithoutMovingOrDeletingIt() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = charger("pinned-station", 13, 101, 180, .35, true);
+        var pinned = new EvRouteStopRequest("pinned", "Pinned Station", 13, 101, saved, true, EvChargerSelectionSource.MANUAL, 80);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(base.stops().getFirst(), pinned, base.stops().getLast()), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId("pinned-station")).thenReturn(withStatus(saved, EvChargerStatus.PERMANENTLY_CLOSED));
+
+        var response = optimizeWithLiveStations(request, new OptimizationRoute(List.of()), live);
+
+        assertThat(response.feasible()).isFalse();
+        assertThat(response.message()).contains("Pinned Station").contains("permanently closed");
+        assertThat(response.operations()).isEmpty();
+    }
+
+    @Test
+    void anUnlockedStopThatHasClosedIsReplacedAndTheTravellerIsTold() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = charger("old-station", 13, 101, 180, .35, true);
+        var stop = new EvRouteStopRequest("old", "Old Station", 13, 101, saved, false, EvChargerSelectionSource.AUTO);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(base.stops().getFirst(), stop, base.stops().getLast()), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId("old-station")).thenReturn(withStatus(saved, EvChargerStatus.TEMPORARILY_CLOSED));
+        var route = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, base.stops().getFirst(), base.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)),
+                List.of(candidate(charger("open-station", 13, 101.4, 180, .9, false), 140, 1, null)))));
+
+        var response = optimizeWithLiveStations(request, route, live);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).extracting(EvPlanOperation::type).containsExactly(EvPlanOperationType.REPLACE_CHARGER);
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("Old Station") && warning.contains("temporarily closed"));
+    }
+
+    @Test
+    void aClosedStationOnAnEarlierDayIsNamedBecauseThisDaysBatteryDependsOnIt() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = charger("earlier-station", 13, 99.5, 180, .35, true);
+        var earlier = new EvRouteOptimizationRequest.Day("day-1", List.of(
+                new EvRouteStopRequest("start", "Start", 13, 99, null, false, null),
+                new EvRouteStopRequest("earlier", "Earlier Station", 13, 99.5, saved, true, EvChargerSelectionSource.MANUAL, 80),
+                new EvRouteStopRequest("join", "Join", 13, 100, null, false, null)));
+        var request = new EvRouteOptimizationRequest("day-2", base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0, List.of(earlier));
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId("earlier-station")).thenReturn(withStatus(saved, EvChargerStatus.PERMANENTLY_CLOSED));
+
+        var response = optimizeWithLiveStations(request, new OptimizationRoute(List.of()), live);
+
+        assertThat(response.feasible()).isFalse();
+        assertThat(response.message()).contains("Earlier Station").contains("Day 1");
+    }
+
+    @Test
+    void aClosedStationOnALaterDayWarnsWithoutBlockingToday() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = charger("later-station", 13, 103.5, 180, .35, true);
+        var later = new EvRouteOptimizationRequest.Day("day-2", List.of(
+                new EvRouteStopRequest("next-start", "Next start", 13, 103, null, false, null),
+                new EvRouteStopRequest("later", "Later Station", 13, 103.5, saved, true, EvChargerSelectionSource.MANUAL, 80),
+                new EvRouteStopRequest("next-end", "Next end", 13, 104, null, false, null)));
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0, List.of(), List.of(later));
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId("later-station")).thenReturn(withStatus(saved, EvChargerStatus.TEMPORARILY_CLOSED));
+        var route = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, base.stops().getFirst(), base.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)),
+                List.of(candidate(charger("open-station", 13, 101.4, 180, .9, false), 140, 1, null)))));
+
+        var response = optimizeWithLiveStations(request, route, live);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("Later Station") && warning.contains("Day 2") && warning.contains("closed"));
+    }
+
+    @Test
+    void whenAStationCannotBeRecheckedItsSavedDataIsKeptAndNotPresentedAsFresh() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = charger("saved-station", 13, 101.4, 180, .35, true);
+        var stop = new EvRouteStopRequest("saved", "Saved Station", 13, 101.4, saved, true, EvChargerSelectionSource.MANUAL, 80);
+        var request = new EvRouteOptimizationRequest("day-1", List.of(base.stops().getFirst(), stop, base.stops().getLast()), base.vehicle(), 80.0, 10.0, 70.0, 20.0);
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId("saved-station")).thenThrow(new com.navio.mobilityandevservice.exception.ProviderUnavailableException("down", new RuntimeException("down")));
+        var route = new OptimizationRoute(List.of(
+                span(0, base.stops().getFirst(), stop, 140, 7_000, List.of()),
+                span(1, stop, base.stops().getLast(), 160, 7_400, List.of())));
+
+        var response = optimizeWithLiveStations(request, route, live);
+
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("couldn't be re-checked"));
+        assertThat(response.message()).doesNotContain("closed");
+    }
+
+    @Test
+    void reCheckingStationsIsBoundedAndWhatWasNotCheckedIsReported() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var days = new ArrayList<EvRouteOptimizationRequest.Day>();
+        for (int i = 0; i < SavedChargerRevalidator.MAX_STATIONS_CHECKED + 6; i++) {
+            days.add(new EvRouteOptimizationRequest.Day("later-" + i, List.of(
+                    new EvRouteStopRequest("charger-" + i, "Charger " + i, 13, 103, charger("station-" + i, 13, 103, 180, .35, true), true, EvChargerSelectionSource.MANUAL, 80))));
+        }
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0, List.of(), days);
+        var live = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(live.byId(any())).thenAnswer(call -> charger(call.getArgument(0), 13, 103, 180, .9, false));
+
+        var outcome = new SavedChargerRevalidator(live).check(request);
+
+        org.mockito.Mockito.verify(live, org.mockito.Mockito.times(SavedChargerRevalidator.MAX_STATIONS_CHECKED)).byId(any());
+        assertThat(outcome.uncheckedStations()).isEqualTo(6);
+    }
+
+    private EvChargerResponse mixedPlugs(java.util.Map<EvConnectorType, Double> power) {
+        var plain = charger("mixed", 13, 101, 150, .9, false, List.of(EvConnectorType.CCS2, EvConnectorType.TYPE2));
+        return new EvChargerResponse(plain.id(), plain.name(), plain.operatorName(), plain.location(), plain.address(), plain.province(),
+                plain.connectorTypes(), plain.maxKw(), plain.totalConnectors(), plain.availableConnectors(), plain.priceText(), plain.openingHours(),
+                plain.source(), plain.verificationStatus(), plain.status(), plain.ratingAvg(), plain.ratingCount(), plain.confidenceScore(), plain.stale(), power, null);
+    }
+
+    private EvVehicleSpec type2Car(double maxAcKw) {
+        return new EvVehicleSpec(60.0, 20.0, maxAcKw, 180.0, List.of(EvConnectorType.TYPE2), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null));
+    }
+
+    @Test
+    void chargesAtTheSpeedOfThePlugThatFitsNotTheStationsFastestPlug() {
+        // CCS2 at 150 kW and Type 2 at 22 kW, with a Type 2 car that accepts 43 kW AC: the car gets 22 kW.
+        var station = mixedPlugs(java.util.Map.of(EvConnectorType.CCS2, 150.0, EvConnectorType.TYPE2, 22.0));
+        assertThat(SocConstrainedRouteOptimizer.effectivePowerKw(station, type2Car(43))).isEqualTo(22.0);
+        assertThat(SocConstrainedRouteOptimizer.chargeMinutes(20, 80, station, type2Car(43))).isCloseTo(36.0 / 22 * 60, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
+    void aMultiPlugStationWithNoPerPlugDataHasUnknownSpeedRatherThanAnotherPlugsSpeed() {
+        var legacy = mixedPlugs(java.util.Map.of());
+        assertThat(SocConstrainedRouteOptimizer.effectivePowerKw(legacy, type2Car(43))).isNull();
+        assertThat(SocConstrainedRouteOptimizer.chargeMinutes(20, 80, legacy, type2Car(43))).isNull();
+    }
+
+    @Test
+    void aSinglePlugTypeStationsTopSpeedIsThatPlugsSpeed() {
+        var single = charger("single", 13, 101, 50, .9, false, List.of(EvConnectorType.CCS2));
+        var car = new EvVehicleSpec(60.0, 20.0, 11.0, 180.0, List.of(EvConnectorType.CCS2), new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null));
+        assertThat(SocConstrainedRouteOptimizer.effectivePowerKw(single, car)).isEqualTo(50.0);
+    }
+
+    @Test
+    void anEarlierDaysChargeAtAMixedStationUsesTheFittingPlugsSpeed() {
+        var station = mixedPlugs(java.util.Map.of(EvConnectorType.CCS2, 150.0, EvConnectorType.TYPE2, 22.0));
+        var request = new EvRouteOptimizationRequest("day-2", List.of(
+                new EvRouteStopRequest("join", "Join", 13, 102, null, false, null),
+                new EvRouteStopRequest("end", "End", 13, 103, null, false, null)),
+                type2Car(43), 50.0, 10.0, 70.0, 20.0, List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(
+                new EvRouteStopRequest("first", "First", 13, 100, null, false, null),
+                // 10 minutes at 22 kW adds 3.67 kWh, about 6.1%. At the wrong 43 kW it would add about 11.9%.
+                new EvRouteStopRequest("mixed", "Mixed", 13, 101, station, true, null, null, null, 10),
+                new EvRouteStopRequest("join", "Join", 13, 102, null, false, null)))));
+        var routes = mock(RouteService.class);
+        stubRoads(routes, (from, to) -> 0);
+
+        var state = PrecedingTripEnergy.resolve(request, routes);
+
+        assertThat(state.failure()).isNull();
+        assertThat(state.socPct()).isCloseTo(50 + 10 * 22 / 60.0 / 60 * 100, org.assertj.core.data.Offset.offset(1e-9));
     }
 
     @Test

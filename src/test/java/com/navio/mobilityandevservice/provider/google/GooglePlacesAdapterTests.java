@@ -247,6 +247,9 @@ class GooglePlacesAdapterTests {
         assertThat(charger.connectorTypes())
                 .containsExactly(EvConnectorType.CCS2, EvConnectorType.TYPE2);
         assertThat(charger.maxKw()).isEqualTo(150);
+        assertThat(charger.connectorPowerKw()).containsEntry(com.navio.mobilityandevservice.domain.ev.EvConnectorType.CCS2, 150.0);
+        assertThat(charger.connectorPowerKw()).containsKey(com.navio.mobilityandevservice.domain.ev.EvConnectorType.TYPE2);
+        assertThat(charger.statusCheckedAt()).isNotNull();
         assertThat(charger.totalConnectors()).isEqualTo(6);
         assertThat(charger.availableConnectors()).isEqualTo(3);
         assertThat(charger.status()).isEqualTo(EvChargerStatus.ACTIVE);

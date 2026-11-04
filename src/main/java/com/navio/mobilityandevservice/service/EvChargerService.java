@@ -79,6 +79,27 @@ public class EvChargerService {
         );
     }
 
+    /** One station's latest details, reusing recent answers. Falls back to an older answer marked stale. */
+    public EvChargerResponse byId(String id) {
+        String cacheKey = "google_ev_id_" + id;
+        List<EvChargerResponse> cached = evChargerSearchCache.getFresh(cacheKey).orElse(null);
+        if (cached != null && !cached.isEmpty()) return cached.getFirst();
+        return circuitBreaker.run(
+                () -> {
+                    EvChargerResponse charger = evChargerProvider.evChargerById(id);
+                    evChargerSearchCache.put(cacheKey, List.of(charger));
+                    return charger;
+                },
+                throwable -> evChargerSearchCache.getStale(cacheKey)
+                        .filter(chargers -> !chargers.isEmpty())
+                        .map(chargers -> withStaleFlag(chargers.getFirst()))
+                        .orElseThrow(() -> new ProviderUnavailableException(
+                                "EV station details are temporarily unavailable",
+                                throwable
+                        ))
+        );
+    }
+
     private EvChargerListResponse response(
             List<EvChargerResponse> chargers,
             EvConnectorType connector,
@@ -120,7 +141,9 @@ public class EvChargerService {
                 charger.ratingAvg(),
                 charger.ratingCount(),
                 charger.confidenceScore(),
-                true
+                true,
+                charger.connectorPowerKw(),
+                charger.statusCheckedAt()
         );
     }
 

@@ -351,12 +351,27 @@ public class SocConstrainedRouteOptimizer {
     }
 
     static Double effectivePowerKw(EvChargerResponse charger, EvVehicleSpec vehicle) {
-        if (!compatible(charger, vehicle)) return null;
-        var connectors = charger.connectorTypes().stream().filter(c -> c != EvConnectorType.OTHER)
-                .filter(vehicle.connectorTypes()::contains).toList();
-        Double limit = connectors.stream().map(c -> DC_CONNECTORS.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
-                .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);
-        return limit != null && CanonicalEnergy.positive(charger.maxKw()) ? Math.min(charger.maxKw(), limit) : null;
+        return compatible(charger, vehicle) ? fittingPlugPowerKw(charger, vehicle) : null;
+    }
+
+    /**
+     * The fastest charge this car can take from a plug it fits. A station's top speed may belong to a plug
+     * the car cannot use, so it only speaks for a plug when that is the station's one type. With several
+     * types and no per-plug data the speed is unknown, not borrowed from another plug.
+     */
+    static Double fittingPlugPowerKw(EvChargerResponse charger, EvVehicleSpec vehicle) {
+        boolean oneType = charger.connectorTypes().stream().filter(c -> c != EvConnectorType.OTHER).distinct().count() == 1;
+        Double best = null;
+        for (EvConnectorType connector : charger.connectorTypes()) {
+            if (connector == EvConnectorType.OTHER || !vehicle.connectorTypes().contains(connector)) continue;
+            Double carLimit = DC_CONNECTORS.contains(connector) ? vehicle.maxDcKw() : vehicle.maxAcKw();
+            Double plug = charger.connectorPowerKw().get(connector);
+            if (plug == null && charger.connectorPowerKw().isEmpty() && oneType) plug = charger.maxKw();
+            if (!CanonicalEnergy.positive(carLimit) || !CanonicalEnergy.positive(plug)) continue;
+            double usable = Math.min(carLimit, plug);
+            if (best == null || usable > best) best = usable;
+        }
+        return best;
     }
 
     static boolean compatible(EvChargerResponse charger, EvVehicleSpec vehicle) {

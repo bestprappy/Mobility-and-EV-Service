@@ -9,12 +9,9 @@ import com.navio.mobilityandevservice.domain.route.*;
 import com.navio.mobilityandevservice.service.RouteService;
 
 import java.util.List;
-import java.util.Set;
 
 /** Replay saved earlier days unchanged; only the selected day may be optimized. */
 final class PrecedingTripEnergy {
-    private static final Set<EvConnectorType> DC = Set.of(EvConnectorType.CCS1, EvConnectorType.CCS2,
-            EvConnectorType.CHADEMO, EvConnectorType.NACS, EvConnectorType.GB_T);
     /** {@code batteryShortfall}: the itinerary is known and connected, it just needs more charge to complete. */
     record State(Double socPct, String failure, boolean batteryShortfall, Integer uncheckedDayIndex) {
         State(Double socPct, String failure, boolean batteryShortfall) { this(socPct, failure, batteryShortfall, null); }
@@ -85,6 +82,8 @@ final class PrecedingTripEnergy {
                 belowReserve |= i > 0 && "BELOW_RESERVE".equals(result.predictedArrivalReserveStatus());
                 // Whatever follows an unreachable leg is unknown too, so only the first problem classifies the failure.
                 boolean unreachable = "INFEASIBLE".equals(result.predictedLegFeasibility());
+                // A later day that loses a closed station can be replanned, so it warns rather than blocks.
+                shortfall |= stopAtGap && !unknownFirst && reportedClosed(stop);
                 unknownFirst |= !shortfall && !unreachable && (!"FEASIBLE".equals(result.predictedLegFeasibility())
                         || result.departureSocPct() == null || result.nominalChargeMinutes() == null);
                 shortfall |= !unknownFirst && i > 0 && (unreachable || "BELOW_RESERVE".equals(result.predictedArrivalReserveStatus()));
@@ -104,6 +103,11 @@ final class PrecedingTripEnergy {
         return new State(forward, null, false, uncheckedDayIndex);
     }
 
+    private static boolean reportedClosed(EvRouteStopRequest stop) {
+        return stop.chargerStop() && (stop.charger().status() == com.navio.mobilityandevservice.domain.ev.EvChargerStatus.TEMPORARILY_CLOSED
+                || stop.charger().status() == com.navio.mobilityandevservice.domain.ev.EvChargerStatus.PERMANENTLY_CLOSED);
+    }
+
     private static RoutePointRequest point(EvRouteStopRequest stop) {
         return new RoutePointRequest(stop.itemId(), stop.name(), stop.chargerStop() ? RoutePointType.CHARGER : RoutePointType.PLACE, stop.lat(), stop.lng());
     }
@@ -121,9 +125,7 @@ final class PrecedingTripEnergy {
                 : station.connectorTypes().contains(EvConnectorType.OTHER) || vehicle.connectorTypes().contains(EvConnectorType.OTHER)
                 ? null : Boolean.FALSE;
         if (station.status() != com.navio.mobilityandevservice.domain.ev.EvChargerStatus.ACTIVE) compatible = null;
-        Double limit = matching.stream().map(c -> DC.contains(c) ? vehicle.maxDcKw() : vehicle.maxAcKw())
-                .filter(CanonicalEnergy::positive).max(Double::compare).orElse(null);
-        Double power = limit != null && station.maxKw() > 0 ? Math.min(limit, station.maxKw()) : null;
+        Double power = SocConstrainedRouteOptimizer.fittingPlugPowerKw(station, vehicle);
         return new CanonicalEnergy.Charging(stop.effectiveTargetSocPct(),
                 stop.effectiveChargeMinutes(), compatible, power);
     }

@@ -300,6 +300,16 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 .toList();
     }
 
+    @Override
+    public EvChargerResponse evChargerById(String id) {
+        GooglePlace place = execute("EV station details", () -> restClient.get()
+                .uri("/places/{id}", id)
+                .header("X-Goog-FieldMask", EV_CHARGER_FIELD_MASK.replace("places.", ""))
+                .retrieve()
+                .body(GooglePlace.class));
+        return mapEvCharger(place);
+    }
+
     private PlaceSearchResponse mapSearchResponse(GooglePlaceListResponse response) {
         List<PlaceDetailResponse> items = safeList(response.places()).stream()
                 .filter(Objects::nonNull)
@@ -426,8 +436,21 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 place.rating() == null ? 0 : place.rating(),
                 place.userRatingCount() == null ? 0 : place.userRatingCount(),
                 place.evChargeOptions() == null ? 0.65 : 0.82,
-                false
+                false,
+                connectorPower(aggregations),
+                java.time.Instant.now()
         );
+    }
+
+    /** A station's fastest plug says nothing about its others, so speed is kept per connector type. */
+    private java.util.Map<EvConnectorType, Double> connectorPower(List<GoogleConnectorAggregation> aggregations) {
+        java.util.Map<EvConnectorType, Double> power = new java.util.EnumMap<>(EvConnectorType.class);
+        for (GoogleConnectorAggregation aggregation : aggregations) {
+            if (aggregation.maxChargeRateKw() != null && aggregation.maxChargeRateKw() > 0) {
+                power.merge(mapConnectorType(aggregation.type()), aggregation.maxChargeRateKw(), Math::max);
+            }
+        }
+        return power;
     }
 
     private int connectorCount(
