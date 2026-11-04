@@ -6,9 +6,9 @@ import com.navio.mobilityandevservice.domain.route.RouteCoordinate;
 
 import java.util.List;
 
-record OptimizationRoute(List<OptimizationRouteSpan> spans, int failedChargerSearches) {
+record OptimizationRoute(List<OptimizationRouteSpan> spans, int failedChargerSearches, boolean thinnedChargerSearch) {
     OptimizationRoute(List<OptimizationRouteSpan> spans) {
-        this(spans, 0);
+        this(spans, 0, false);
     }
     OptimizationRoute {
         spans = List.copyOf(spans);

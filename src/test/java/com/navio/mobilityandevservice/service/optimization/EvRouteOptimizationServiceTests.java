@@ -338,6 +338,35 @@ class EvRouteOptimizationServiceTests {
     }
 
     @Test
+    void whenTheNextDayStillNeedsAChargerThisDayLeavesItEnoughBatteryToReachOne() {
+        // Found in the real run: Bangkok to Chumphon took the cheapest plan and finished at 12.1% against a
+        // 12% reserve, so Chumphon to Phuket could not reach any charger and day 2 could never be planned.
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var nextStart = new EvRouteStopRequest("next-start", "Next start", 13, 103, null, false, null);
+        var far = new EvRouteStopRequest("far", "Far", 13, 104, null, false, null);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(), 80.0, 10.0, 70.0, 20.0,
+                List.of(), List.of(new EvRouteOptimizationRequest.Day("day-2", List.of(nextStart, far))));
+
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> to.equals("ev-verify-0") ? 140 : to.equals("ev-verify-1") ? 150 : from.equals("ev-verify-1") ? 10 : from.equals("ev-verify-0") ? 160 : to.equals("far") ? 300 : 300);
+        // A second station just before the destination would finish fuller, but adding a stop only to arrive
+        // fuller costs far more than charging longer at the one the day already needs.
+        when(finder.populateCandidates(any(), any(), any())).thenReturn(new OptimizationRoute(List.of(new OptimizationRouteSpan(
+                0, request.stops().getFirst(), request.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)),
+                List.of(candidate(charger("mid", 13, 101.4, 180, .9, false), 140, 1, null),
+                        candidate(charger("late", 13, 102.9, 180, .9, false), 290, 1, null))))));
+
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).hasSize(1);
+        assertThat(response.operations().getFirst().departureSocPct()).isEqualTo(95);
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("later day"));
+    }
+
+    @Test
     void aDisconnectedLaterDayIsNamedAsUncheckedAndLaterDaysAreIncluded() {
         var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
         var routes = mock(RouteService.class);
@@ -660,6 +689,89 @@ class EvRouteOptimizationServiceTests {
         assertThat(result.feasible()).isFalse();
         assertThat(result.finalSocPct()).isNull();
         assertThat(result.warnings()).anyMatch(w -> w.contains("unavailable"));
+    }
+
+    @Test
+    void aRealisticallyDenseCorridorProducesAPlanInsteadOfHittingTheSearchLimit() {
+        // Found in the real run: Bangkok to Chumphon, 480 km with dozens of real stations, always reported
+        // the search limit, because labels that had visited different stations could not prune each other.
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var candidates = new ArrayList<OptimizationChargerCandidate>();
+        for (int i = 1; i <= 40; i++) {
+            candidates.add(candidate(charger("real-" + i, 13, 100 + i * .05, 40 + (i * 37) % 200, .82, false), i * 12, (i % 5) * .7, null));
+        }
+        var result = new SocConstrainedRouteOptimizer().optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0,
+                request.stops().getFirst(), request.stops().getLast(), 480, 21_600, List.of(), candidates))), request);
+
+        assertThat(result.warnings()).noneMatch(warning -> warning.contains("search limit"));
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.finalSocPct()).isGreaterThanOrEqualTo(10);
+        assertThat(result.chargeStops()).isNotEmpty();
+    }
+
+    @Test
+    void theAlternativesAlwaysIncludeChargingLongerAtTheSameStops() {
+        // Found in the real run: with many stations nearby, sampling could skip "same stop, charged longer",
+        // so re-previewing a saved plan flipped its target from 95% back to 85%.
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var candidates = new ArrayList<OptimizationChargerCandidate>();
+        for (int i = 0; i < 12; i++) {
+            candidates.add(candidate(charger("nearby-" + i, 13, 101 + i * .01, 120 + i * 5, .82, false), 135 + i * 2, i * .2, null));
+        }
+        var result = new SocConstrainedRouteOptimizer().optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0,
+                request.stops().getFirst(), request.stops().getLast(), 300, 14_400, List.of(), candidates))), request);
+
+        assertThat(result.feasible()).isTrue();
+        String cheapest = result.chargeStops().getFirst().candidate().charger().id();
+        assertThat(result.costlierAlternatives()).anyMatch(plan -> plan.chargeStops().size() == result.chargeStops().size()
+                && plan.chargeStops().getFirst().candidate().charger().id().equals(cheapest)
+                && plan.chargeStops().getFirst().departureSocPct() == 95);
+    }
+
+    @Test
+    void aRouteTooLongToSearchFullySaysSoInsteadOfSilentlyLosingCoverage() {
+        // Found in the real run: Hat Yai to Chiang Rai, about 1,500 km, used every search point and said nothing.
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var chargers = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(chargers.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(List.of(), null));
+        var longRoute = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 1_500, 72_000,
+                List.of(new RouteCoordinate(100, 7), new RouteCoordinate(100, 20.5)), List.of())));
+        var shortRoute = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 300, 14_400,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(103, 13)), List.of())));
+
+        assertThat(new RouteCorridorChargerFinder(chargers).populateCandidates(longRoute, request, List.of()).thinnedChargerSearch()).isTrue();
+        assertThat(new RouteCorridorChargerFinder(chargers).populateCandidates(shortRoute, request, List.of()).thinnedChargerSearch()).isFalse();
+
+        var routes = mock(RouteService.class);
+        var finder = mock(RouteCorridorChargerFinder.class);
+        stubRoads(routes, (from, to) -> 30);
+        when(finder.populateCandidates(any(), any(), any())).thenAnswer(call -> {
+            OptimizationRoute route = call.getArgument(0);
+            return new OptimizationRoute(route.spans(), 0, true);
+        });
+        var response = new EvRouteOptimizationService(routes, finder, new SocConstrainedRouteOptimizer()).optimize(request);
+        assertThat(response.warnings()).anyMatch(warning -> warning.contains("long route"));
+    }
+
+    @Test
+    void aSavedStopCannotBeChargedTwiceWhenItProjectsOntoTwoSpans() {
+        var station = charger("saved-station", 13, 101, 180, .9, false);
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var origin = base.stops().getFirst();
+        var middle = new EvRouteStopRequest("middle", "Middle", 13, 102, null, false, null);
+        var saved = new EvRouteStopRequest("saved", "Saved", 13, 101, station, false, EvChargerSelectionSource.AUTO);
+        var end = base.stops().getLast();
+        var request = new EvRouteOptimizationRequest("day-1", List.of(origin, saved, middle, end), base.vehicle(), 40.0, 10.0, 70.0, 20.0);
+        var route = new OptimizationRoute(List.of(
+                span(0, origin, middle, 90, 3600, List.of(candidate(station, 45, 0, "saved"))),
+                span(1, middle, end, 150, 6000, List.of(candidate(station, 75, 0, "saved")))));
+
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+
+        // Both legs together need two charges, and this one stop can only supply one of them.
+        assertThat(result.chargeStops().stream().filter(stop -> "saved".equals(stop.candidate().existingItemId())).count()).isLessThanOrEqualTo(1);
     }
 
     @org.junit.jupiter.api.Test

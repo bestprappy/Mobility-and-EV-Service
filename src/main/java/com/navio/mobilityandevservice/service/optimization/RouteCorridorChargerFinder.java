@@ -86,7 +86,7 @@ public class RouteCorridorChargerFinder {
                         .sorted(Comparator.comparingDouble(OptimizationChargerCandidate::progressKm))
                         .toList()))
                 .toList();
-        return new OptimizationRoute(sortedSpans, search.failedSearches());
+        return new OptimizationRoute(sortedSpans, search.failedSearches(), anchors.size() > MAX_SEARCH_ANCHORS);
     }
 
     /** Which leg between kept stops each movable charger currently sits on. */

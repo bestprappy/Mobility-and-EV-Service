@@ -146,7 +146,10 @@ public class EvRouteOptimizationService {
                 return new EvRouteOptimizationResponse(request.blockId(), false, List.of(), verified.finalSocPct(),
                         verified.totalDrivingSeconds(), verified.totalChargingMinutes(), message, List.of(message, later.failure()));
             }
-            if (withShortfallLater == null) {
+            // The later day must still reach a charger of its own, so leave it the most battery that was
+            // tried, by charging longer. Adding a stop only to arrive fuller costs more than it gives.
+            if (withShortfallLater == null || (verified.chargeStops().size() <= withShortfallLater.chargeStops().size()
+                    && verified.finalSocPct() > withShortfallLater.finalSocPct())) {
                 withShortfallLater = verified;
                 shortfallUncheckedWarning = unchecked;
             }
@@ -186,6 +189,9 @@ public class EvRouteOptimizationService {
         warnings.addAll(extraWarnings);
         if (route.failedChargerSearches() > 0) {
             warnings.add("Part of the charger search was unavailable, so a closer or faster charger may be missing from this plan.");
+        }
+        if (route.thinnedChargerSearch()) {
+            warnings.add("This is a long route, so chargers were searched for less often along it and a closer or faster one may be missing. Splitting it across more days searches it fully.");
         }
         return new EvRouteOptimizationResponse(
                 request.blockId(),
