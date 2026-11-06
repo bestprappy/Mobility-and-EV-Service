@@ -1,5 +1,6 @@
 package com.navio.mobilityandevservice.service;
 import com.navio.mobilityandevservice.exception.DiscoveryBusyException;
+import com.navio.mobilityandevservice.exception.DiscoveryDisabledException;
 import org.junit.jupiter.api.Test;
 import java.time.*;
 import static org.assertj.core.api.Assertions.*;
@@ -30,5 +31,10 @@ class DiscoveryRequestLimiterTests {
         var second = limiter.acquire();
         second.close();
         assertThatThrownBy(limiter::acquire).isInstanceOf(DiscoveryBusyException.class);
+    }
+    @Test void refusesEveryPermitWhileDiscoveryIsTurnedOff() {
+        var limiter = new DiscoveryRequestLimiter(false,60,4,new MutableClock());
+        assertThatThrownBy(limiter::acquire).isInstanceOf(DiscoveryDisabledException.class);
+        assertThatThrownBy(limiter::acquire).isInstanceOf(DiscoveryDisabledException.class);
     }
 }

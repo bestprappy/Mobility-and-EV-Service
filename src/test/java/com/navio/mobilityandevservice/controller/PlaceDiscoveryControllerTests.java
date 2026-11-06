@@ -38,4 +38,13 @@ class PlaceDiscoveryControllerTests {
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
         mvc.perform(get("/v1/geo/places/p/reader")).andExpect(status().isServiceUnavailable());
     }
+    @Test void turnedOffDiscoveryMapsTo404WithErrorBody() throws Exception {
+        var service = mock(PlaceDiscoveryService.class);
+        when(service.reader("p")).thenThrow(new com.navio.mobilityandevservice.exception.DiscoveryDisabledException());
+        var mvc = MockMvcBuilders.standaloneSetup(new PlaceDiscoveryController(service))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
+        mvc.perform(get("/v1/geo/places/p/reader")).andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.message").value("Place discovery is not available"));
+    }
 }

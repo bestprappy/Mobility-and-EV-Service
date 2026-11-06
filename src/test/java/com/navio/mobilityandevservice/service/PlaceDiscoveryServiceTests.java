@@ -102,4 +102,13 @@ class PlaceDiscoveryServiceTests {
         assertThat(PlaceDiscoveryService.seasonal("Tokyo",35.6,139.6,11)).isNull();
         assertThat(PlaceDiscoveryService.seasonal("Bangkok",35.6,139.6,11)).isNull();
     }
+    @Test void turnedOffDiscoveryNeverCallsGoogle() {
+        var provider = mock(GooglePlacesAdapter.class);
+        var service = service(provider, new DiscoveryRequestLimiter(false,60,4,new DiscoveryRequestLimiterTests.MutableClock()));
+        assertThatThrownBy(() -> service.discover("Tokyo",35.6,139.6,1,"popular",0,4))
+                .isInstanceOf(com.navio.mobilityandevservice.exception.DiscoveryDisabledException.class);
+        assertThatThrownBy(() -> service.reader("p"))
+                .isInstanceOf(com.navio.mobilityandevservice.exception.DiscoveryDisabledException.class);
+        org.mockito.Mockito.verifyNoInteractions(provider);
+    }
 }

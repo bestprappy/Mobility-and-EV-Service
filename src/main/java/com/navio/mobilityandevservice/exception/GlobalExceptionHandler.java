@@ -20,6 +20,12 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(DiscoveryDisabledException.class)
+    ResponseEntity<ApiErrorResponse> handleDiscoveryDisabled(DiscoveryDisabledException exception) {
+        return response(HttpStatus.NOT_FOUND, "Place discovery is not available",
+                "This feature is turned off", null);
+    }
+
     @ExceptionHandler(DiscoveryBusyException.class)
     ResponseEntity<ApiErrorResponse> handleDiscoveryBusy(DiscoveryBusyException exception) {
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "1")
