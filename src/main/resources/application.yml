@@ -12,3 +12,8 @@ navio:
     enabled: false
     requests-per-minute: 60
     max-concurrent: 4
+  # Google calls stop for the rest of the month once a meter reaches its limit (ev.provider_monthly_usage).
+  # Defaults sit ~5% under each free tier; override with monthly-limits.<METER> (see GoogleUsageMeter).
+  google:
+    free-tier:
+      enabled: true

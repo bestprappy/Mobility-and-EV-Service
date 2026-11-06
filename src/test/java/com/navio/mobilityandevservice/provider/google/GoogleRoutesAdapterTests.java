@@ -36,7 +36,7 @@ class GoogleRoutesAdapterTests {
                 .baseUrl("https://routes.googleapis.com/directions/v2:computeRoutes")
                 .defaultHeader("X-Goog-Api-Key", "test-key");
         server = MockRestServiceServer.bindTo(builder).build();
-        adapter = new GoogleRoutesAdapter(builder.build());
+        adapter = new GoogleRoutesAdapter(builder.build(), com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget.unlimited());
     }
 
     @Test
@@ -415,5 +415,20 @@ class GoogleRoutesAdapterTests {
 
         assertThatThrownBy(() -> adapter.computeRoute(RouteProfile.TRANSIT, threeStops))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void refusedRoutesNeverReachGoogle() {
+        var refusing = org.mockito.Mockito.mock(com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget.class);
+        org.mockito.Mockito.doThrow(new com.navio.mobilityandevservice.exception.FreeTierExhaustedException(
+                        com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.ROUTES))
+                .when(refusing).consume(com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.ROUTES);
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://routes.googleapis.com/directions/v2:computeRoutes");
+        var noRequests = MockRestServiceServer.bindTo(builder).build();
+        var limited = new GoogleRoutesAdapter(builder.build(), refusing);
+
+        assertThatThrownBy(() -> limited.computeRoute(RouteProfile.TRANSIT, TWO_STATIONS))
+                .isInstanceOf(com.navio.mobilityandevservice.exception.FreeTierExhaustedException.class);
+        noRequests.verify();
     }
 }

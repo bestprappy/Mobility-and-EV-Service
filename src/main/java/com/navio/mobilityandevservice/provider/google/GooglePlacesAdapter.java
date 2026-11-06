@@ -19,6 +19,8 @@ import com.navio.mobilityandevservice.domain.place.PlaceSuggestionResponse;
 import com.navio.mobilityandevservice.exception.ProviderClientException;
 import com.navio.mobilityandevservice.provider.EvChargerProvider;
 import com.navio.mobilityandevservice.provider.PlaceProvider;
+import com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget;
+import com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
@@ -85,9 +87,11 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     private static final List<String> DESTINATION_TYPES = List.of("(regions)");
 
     private final RestClient restClient;
+    private final GoogleFreeTierBudget budget;
 
-    public GooglePlacesAdapter(@Qualifier("googlePlacesRestClient") RestClient restClient) {
+    public GooglePlacesAdapter(@Qualifier("googlePlacesRestClient") RestClient restClient, GoogleFreeTierBudget budget) {
         this.restClient = restClient;
+        this.budget = budget;
     }
 
     @Override
@@ -107,7 +111,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 country == null ? null : List.of(country.toLowerCase(Locale.ROOT))
         );
 
-        GoogleAutocompleteResponse response = execute("autocomplete", () -> restClient.post()
+        GoogleAutocompleteResponse response = execute(GoogleUsageMeter.PLACES_AUTOCOMPLETE, "autocomplete", () -> restClient.post()
                 .uri("/places:autocomplete")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask", AUTOCOMPLETE_FIELD_MASK)
@@ -127,7 +131,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     @Override
     public PlaceDetailResponse getDetail(String providerPlaceId, String sessionToken) {
-        GooglePlace place = execute("place detail", () -> restClient.get()
+        GooglePlace place = execute(GoogleUsageMeter.PLACE_DETAILS, "place detail", () -> restClient.get()
                 .uri(uriBuilder -> {
                     var builder = uriBuilder.path("/places/{providerPlaceId}");
                     if (sessionToken != null && !sessionToken.isBlank()) {
@@ -150,7 +154,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 MAX_SEARCH_RESULTS
         );
 
-        GooglePlaceListResponse response = execute("text search", () -> restClient.post()
+        GooglePlaceListResponse response = execute(GoogleUsageMeter.PLACES_TEXT_SEARCH, "text search", () -> restClient.post()
                 .uri("/places:searchText")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask", SEARCH_FIELD_MASK)
@@ -173,7 +177,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 null
         );
 
-        GooglePlaceListResponse response = execute("nearby search", () -> restClient.post()
+        GooglePlaceListResponse response = execute(GoogleUsageMeter.PLACES_NEARBY_SEARCH, "nearby search", () -> restClient.post()
                 .uri("/places:searchNearby")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask", SEARCH_FIELD_MASK)
@@ -186,7 +190,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     /** Uncached, bounded popularity pool. Photo media is resolved only after pagination. */
     public List<PlaceDiscoveryCandidate> discovery(double lat, double lng, List<String> types) {
-        GooglePlaceListResponse response = execute("discovery", () -> restClient.post()
+        GooglePlaceListResponse response = execute(GoogleUsageMeter.PLACES_NEARBY_SEARCH, "discovery", () -> restClient.post()
                 .uri("/places:searchNearby")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask", SEARCH_FIELD_MASK + ",places.businessStatus,places.photos")
@@ -199,7 +203,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     }
 
     public PlaceDiscoveryCandidate reader(String id) {
-        GooglePlace place = execute("place reader", () -> restClient.get()
+        GooglePlace place = execute(GoogleUsageMeter.PLACE_DETAILS, "place reader", () -> restClient.get()
                 .uri("/places/{id}", id)
                 .header("X-Goog-FieldMask", PLACE_FIELD_MASK + ",businessStatus,editorialSummary")
                 .retrieve().body(GooglePlace.class));
@@ -224,7 +228,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     /** Separate from the planner's established text search: country verification needs address components. */
     public ExplorePage exploreSearch(String query, String type, String country, String pageToken) {
-        var response = execute("Explore search", () -> restClient.post().uri("/places:searchText")
+        var response = execute(GoogleUsageMeter.PLACES_TEXT_SEARCH, "Explore search", () -> restClient.post().uri("/places:searchText")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask",SEARCH_FIELD_MASK+",places.addressComponents,places.types,places.businessStatus,places.photos,places.editorialSummary,nextPageToken")
                 .body(new GoogleExploreRequest(query,12,blankToNull(pageToken),blankToNull(type),
@@ -236,7 +240,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     }
 
     public List<PlaceExploreSuggestion> exploreSuggestions(String query, String country) {
-        var response = execute("Explore suggestions",() -> restClient.post().uri("/places:autocomplete")
+        var response = execute(GoogleUsageMeter.PLACES_AUTOCOMPLETE, "Explore suggestions", () -> restClient.post().uri("/places:autocomplete")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask","suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.types,suggestions.queryPrediction.text.text")
                 .body(new GoogleExploreAutocomplete(query,country.isEmpty(),country.isEmpty()?null:List.of(country.toLowerCase(Locale.ROOT))))
@@ -286,7 +290,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 EV_CHARGER_TYPES
         );
 
-        GooglePlaceListResponse response = execute("EV station nearby search", () -> restClient.post()
+        GooglePlaceListResponse response = execute(GoogleUsageMeter.PLACES_NEARBY_SEARCH, "EV station nearby search", () -> restClient.post()
                 .uri("/places:searchNearby")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Goog-FieldMask", EV_CHARGER_FIELD_MASK)
@@ -302,7 +306,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     @Override
     public EvChargerResponse evChargerById(String id) {
-        GooglePlace place = execute("EV station details", () -> restClient.get()
+        GooglePlace place = execute(GoogleUsageMeter.PLACE_DETAILS, "EV station details", () -> restClient.get()
                 .uri("/places/{id}", id)
                 .header("X-Goog-FieldMask", EV_CHARGER_FIELD_MASK.replace("places.", ""))
                 .retrieve()
@@ -516,6 +520,7 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     private String loadPhotoResource(String resource, String placeId) {
         try {
+            budget.consume(GoogleUsageMeter.PLACE_PHOTOS);
             String[] resourceSegments = resource.split("/");
             GooglePhotoMedia media = restClient.get()
                     .uri(uriBuilder -> uriBuilder
@@ -530,11 +535,15 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
         } catch (RestClientException exception) {
             log.warn("Google place photo could not be loaded for placeId={}", placeId);
             return null;
+        } catch (ProviderClientException exception) {
+            // Monthly photo allowance used up: show the place without a photo rather than pay.
+            return null;
         }
     }
 
-    private <T> T execute(String operation, Supplier<T> request) {
+    private <T> T execute(GoogleUsageMeter meter, String operation, Supplier<T> request) {
         try {
+            budget.consume(meter);
             T response = request.get();
             if (response == null) {
                 throw new ProviderClientException("Google Places returned an empty " + operation + " response");

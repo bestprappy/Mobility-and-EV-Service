@@ -80,6 +80,7 @@ class GooglePlacesAdapterTests {
 
     private MockRestServiceServer server;
     private GooglePlacesAdapter adapter;
+    private com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget budget = com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget.unlimited();
 
     @BeforeEach
     void setUp() {
@@ -87,7 +88,7 @@ class GooglePlacesAdapterTests {
                 .baseUrl("https://places.googleapis.com/v1")
                 .defaultHeader("X-Goog-Api-Key", "test-key");
         server = MockRestServiceServer.bindTo(builder).build();
-        adapter = new GooglePlacesAdapter(builder.build());
+        adapter = new GooglePlacesAdapter(builder.build(), budget);
     }
 
     @Test
@@ -256,5 +257,46 @@ class GooglePlacesAdapterTests {
         assertThat(charger.source()).isEqualTo("GOOGLE_PLACES");
         assertThat(charger.openingHours().summary()).contains("Open 24 hours");
         server.verify();
+    }
+
+    @Test
+    void refusedPlaceDetailsNeverReachGoogle() {
+        var refusing = org.mockito.Mockito.mock(com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget.class);
+        org.mockito.Mockito.doThrow(new com.navio.mobilityandevservice.exception.FreeTierExhaustedException(
+                        com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.PLACE_DETAILS))
+                .when(refusing).consume(com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.PLACE_DETAILS);
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://places.googleapis.com/v1");
+        var noRequests = MockRestServiceServer.bindTo(builder).build();
+        var limited = new GooglePlacesAdapter(builder.build(), refusing);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> limited.getDetail("place-123", null))
+                .isInstanceOf(com.navio.mobilityandevservice.exception.FreeTierExhaustedException.class);
+        noRequests.verify();
+    }
+
+    @Test
+    void usedUpPhotoAllowanceKeepsThePlaceWithoutRequestingItsPhoto() {
+        var refusing = org.mockito.Mockito.mock(com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget.class);
+        org.mockito.Mockito.doThrow(new com.navio.mobilityandevservice.exception.FreeTierExhaustedException(
+                        com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.PLACE_PHOTOS))
+                .when(refusing).consume(com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter.PLACE_PHOTOS);
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://places.googleapis.com/v1");
+        var onlyDetails = MockRestServiceServer.bindTo(builder).build();
+        onlyDetails.expect(requestTo("https://places.googleapis.com/v1/places/place-123"))
+                .andRespond(withSuccess("""
+                        {
+                          "id": "place-123",
+                          "displayName": {"text": "Central Park"},
+                          "location": {"latitude": 40.785091, "longitude": -73.968285},
+                          "photos": [{"name": "places/place-123/photos/a"}]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+        var limited = new GooglePlacesAdapter(builder.build(), refusing);
+
+        var place = limited.getDetail("place-123", null);
+
+        assertThat(place.name()).isEqualTo("Central Park");
+        assertThat(place.photoUrl()).isNull();
+        onlyDetails.verify();
     }
 }

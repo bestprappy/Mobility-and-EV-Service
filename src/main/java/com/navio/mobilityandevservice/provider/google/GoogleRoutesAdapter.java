@@ -15,6 +15,8 @@ import com.navio.mobilityandevservice.provider.RoutePlan;
 import com.navio.mobilityandevservice.provider.RouteProvider;
 import com.navio.mobilityandevservice.provider.RouteQueryOptions;
 import com.navio.mobilityandevservice.provider.EncodedPolylineDecoder;
+import com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget;
+import com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -62,9 +64,11 @@ public class GoogleRoutesAdapter implements RouteProvider {
     );
 
     private final RestClient restClient;
+    private final GoogleFreeTierBudget budget;
 
-    public GoogleRoutesAdapter(@Qualifier("googleRoutesRestClient") RestClient restClient) {
+    public GoogleRoutesAdapter(@Qualifier("googleRoutesRestClient") RestClient restClient, GoogleFreeTierBudget budget) {
         this.restClient = restClient;
+        this.budget = budget;
     }
 
     @Override
@@ -103,6 +107,7 @@ public class GoogleRoutesAdapter implements RouteProvider {
         );
 
         try {
+            budget.consume(GoogleUsageMeter.ROUTES);
             GoogleRoutesResponse response = restClient.post()
                     .uri("")
                     .contentType(MediaType.APPLICATION_JSON)

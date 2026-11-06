@@ -17,7 +17,7 @@ import org.springframework.web.client.RestClient;
 import java.net.http.HttpClient;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({GoogleMapsProperties.class, OpenTripPlannerProperties.class})
+@EnableConfigurationProperties({GoogleMapsProperties.class, OpenTripPlannerProperties.class, GoogleFreeTierProperties.class})
 public class RestClientConfiguration {
 
     public static final String GOOGLE_API_KEY_HEADER = "X-Goog-Api-Key";
