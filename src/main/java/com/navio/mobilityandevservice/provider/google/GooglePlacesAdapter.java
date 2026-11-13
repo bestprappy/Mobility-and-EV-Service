@@ -131,7 +131,17 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
 
     @Override
     public PlaceDetailResponse getDetail(String providerPlaceId, String sessionToken) {
-        GooglePlace place = execute(GoogleUsageMeter.PLACE_DETAILS, "place detail", () -> restClient.get()
+        GooglePlace place = fetchDetail(providerPlaceId, sessionToken);
+        return mapPlace(place, providerPlaceId, loadPhotoUrl(place));
+    }
+
+    @Override
+    public PlaceDetailResponse getDetailWithoutPhoto(String providerPlaceId, String sessionToken) {
+        return mapPlace(fetchDetail(providerPlaceId, sessionToken), providerPlaceId, null);
+    }
+
+    private GooglePlace fetchDetail(String providerPlaceId, String sessionToken) {
+        return execute(GoogleUsageMeter.PLACE_DETAILS, "place detail", () -> restClient.get()
                 .uri(uriBuilder -> {
                     var builder = uriBuilder.path("/places/{providerPlaceId}");
                     if (sessionToken != null && !sessionToken.isBlank()) {
@@ -142,8 +152,6 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
                 .header("X-Goog-FieldMask", PLACE_FIELD_MASK)
                 .retrieve()
                 .body(GooglePlace.class));
-
-        return mapPlace(place, providerPlaceId, loadPhotoUrl(place));
     }
 
     @Override

@@ -18,6 +18,9 @@ public interface PlaceProvider {
 
     PlaceDetailResponse getDetail(String providerPlaceId, String sessionToken);
 
+    /** The same place without its photo, which is a separately billed request. */
+    PlaceDetailResponse getDetailWithoutPhoto(String providerPlaceId, String sessionToken);
+
     PlaceSearchResponse textSearch(String query, Double lat, Double lng);
 
     PlaceSearchResponse nearby(double lat, double lng, int radiusMeters);

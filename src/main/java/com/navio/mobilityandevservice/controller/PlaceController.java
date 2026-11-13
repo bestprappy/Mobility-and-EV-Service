@@ -47,9 +47,10 @@ public class PlaceController {
     PlaceDetailResponse getDetail(
             @PathVariable @Size(min = 1, max = 512) String providerPlaceId,
             @RequestParam(defaultValue = "GOOGLE") PlaceProviderName provider,
-            @RequestParam(required = false) @Size(max = 128) String sessionToken
+            @RequestParam(required = false) @Size(max = 128) String sessionToken,
+            @RequestParam(defaultValue = "true") boolean includePhoto
     ) {
-        return placeService.getDetail(providerPlaceId, provider, sessionToken);
+        return placeService.getDetail(providerPlaceId, provider, sessionToken, includePhoto);
     }
 
     @GetMapping("/search")

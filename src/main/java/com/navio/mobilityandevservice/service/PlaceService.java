@@ -88,6 +88,43 @@ public class PlaceService {
         ));
     }
 
+    /**
+     * Same lookup, but {@code includePhoto=false} skips the separately billed photo request. Callers
+     * that already hold a photo, or only want hours or ratings, need not pay for one.
+     */
+    public PlaceDetailResponse getDetail(
+            String providerPlaceId,
+            PlaceProviderName provider,
+            String sessionToken,
+            boolean includePhoto
+    ) {
+        if (includePhoto) {
+            return getDetail(providerPlaceId, provider, sessionToken);
+        }
+        requireGoogle(provider);
+        String withPhotoKey = "detail:" + providerPlaceId;
+        String withoutPhotoKey = "detail-without-photo:" + providerPlaceId;
+
+        // A session token closes an autocomplete session, so that call must still reach Google.
+        if (sessionToken == null || sessionToken.isBlank()) {
+            var cached = detailCache.getFresh(withPhotoKey).or(() -> detailCache.getFresh(withoutPhotoKey));
+            if (cached.isPresent()) {
+                return cached.get();
+            }
+        }
+
+        return circuitBreaker.run(
+                () -> {
+                    PlaceDetailResponse response = placeProvider.getDetailWithoutPhoto(providerPlaceId, sessionToken);
+                    detailCache.put(withoutPhotoKey, response);
+                    return response;
+                },
+                throwable -> detailCache.getStale(withPhotoKey)
+                        .or(() -> detailCache.getStale(withoutPhotoKey))
+                        .orElseThrow(() -> unavailable("Place detail is temporarily unavailable", throwable))
+        );
+    }
+
     public PlaceSearchResponse textSearch(String query, Double lat, Double lng) {
         requireCoordinatePair(lat, lng);
         String cacheKey = String.format(
