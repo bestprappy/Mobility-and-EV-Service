@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class GoogleFreeTierBudget {
 
     /** Google resets monthly free usage on its billing calendar, which runs on Pacific time. */
-    static final ZoneId BILLING_ZONE = ZoneId.of("America/Los_Angeles");
+    public static final ZoneId BILLING_ZONE = ZoneId.of("America/Los_Angeles");
 
     private final ProviderUsageStore store;
     private final GoogleFreeTierProperties properties;

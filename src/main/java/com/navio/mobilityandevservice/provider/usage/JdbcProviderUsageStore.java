@@ -4,6 +4,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
+import java.util.List;
 
 @Repository
 public class JdbcProviderUsageStore implements ProviderUsageStore {
@@ -19,6 +20,12 @@ public class JdbcProviderUsageStore implements ProviderUsageStore {
             RETURNING request_count
             """;
 
+    private static final String READ_MONTH = """
+            SELECT meter, request_count, updated_at
+              FROM ev.provider_monthly_usage
+             WHERE usage_month = ?
+            """;
+
     private final JdbcTemplate jdbcTemplate;
 
     public JdbcProviderUsageStore(JdbcTemplate jdbcTemplate) {
@@ -31,5 +38,14 @@ public class JdbcProviderUsageStore implements ProviderUsageStore {
             return false;
         }
         return !jdbcTemplate.queryForList(CONSUME, Integer.class, usageMonth, meter, limit).isEmpty();
+    }
+
+    @Override
+    public List<MeterUsage> usageFor(LocalDate usageMonth) {
+        return jdbcTemplate.query(READ_MONTH, (row, index) -> new MeterUsage(
+                row.getString("meter"),
+                row.getInt("request_count"),
+                row.getTimestamp("updated_at").toInstant()
+        ), usageMonth);
     }
 }

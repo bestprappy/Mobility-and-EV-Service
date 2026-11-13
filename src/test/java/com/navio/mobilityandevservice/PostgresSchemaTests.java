@@ -62,6 +62,21 @@ class PostgresSchemaTests {
     }
 
     @Test
+    void theUsageReportReadsOnlyTheRequestedMonthWithItsCountsAndTimes() {
+        LocalDate reportMonth = LocalDate.of(1998, 6, 1);
+        usageStore.tryConsume(reportMonth, "PLACE_PHOTOS", 5);
+        usageStore.tryConsume(reportMonth, "PLACE_PHOTOS", 5);
+        usageStore.tryConsume(reportMonth.plusMonths(1), "ROUTES", 5);
+
+        var usage = usageStore.usageFor(reportMonth);
+
+        assertThat(usage).hasSize(1);
+        assertThat(usage.getFirst().meter()).isEqualTo("PLACE_PHOTOS");
+        assertThat(usage.getFirst().requestCount()).isEqualTo(2);
+        assertThat(usage.getFirst().updatedAt()).isNotNull();
+    }
+
+    @Test
     void freeTierCounterKeepsEachMonthAndMeterSeparate() {
         assertThat(usageStore.tryConsume(MONTH, "ROUTES", 1)).isTrue();
         assertThat(usageStore.tryConsume(MONTH, "ROUTES", 1)).isFalse();

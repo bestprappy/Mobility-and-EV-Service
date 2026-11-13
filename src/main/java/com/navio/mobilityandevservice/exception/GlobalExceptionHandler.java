@@ -20,6 +20,12 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(AdminAccessDeniedException.class)
+    ResponseEntity<ApiErrorResponse> handleAdminAccessDenied(AdminAccessDeniedException exception) {
+        return response(HttpStatus.FORBIDDEN, "Only administrators can view this",
+                "Sign in with an administrator account", null);
+    }
+
     @ExceptionHandler(DiscoveryDisabledException.class)
     ResponseEntity<ApiErrorResponse> handleDiscoveryDisabled(DiscoveryDisabledException exception) {
         return response(HttpStatus.NOT_FOUND, "Place discovery is not available",
