@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.ToDoubleFunction;
 
 @Component
 @Slf4j
@@ -29,6 +30,11 @@ public class RouteCorridorChargerFinder {
     // Search circles must overlap enough to cover the default 20 km detour (10 km either side of the
     // road) between sample points: 2 * sqrt(15^2 - 10^2) is about 22 km.
     private static final double SAMPLE_INTERVAL_KM = 20;
+    // Each search returns only the 20 nearest stations, which in a dense city all sit within a
+    // kilometre or two of the point. Short spans are therefore sampled more densely, as long as
+    // the extra points fit inside the search budget.
+    private static final double MIN_DENSE_SAMPLE_INTERVAL_KM = 4;
+    private static final int TARGET_SAMPLES_PER_SPAN = 10;
     private static final int MAX_SEARCH_ANCHORS = 48;
     private static final int MAX_CANDIDATES_PER_SPAN = 40;
     private static final double EARTH_RADIUS_KM = 6_371.0;
@@ -44,7 +50,12 @@ public class RouteCorridorChargerFinder {
             EvRouteOptimizationRequest request,
             List<EvRouteStopRequest> replaceableStops
     ) {
-        List<SearchAnchor> anchors = buildAnchors(route.spans());
+        List<SearchAnchor> anchors = buildAnchors(route.spans(), span -> SAMPLE_INTERVAL_KM);
+        boolean thinnedSearch = anchors.size() > MAX_SEARCH_ANCHORS;
+        if (!thinnedSearch) {
+            List<SearchAnchor> denseAnchors = buildAnchors(route.spans(), this::denseSampleIntervalKm);
+            if (denseAnchors.size() <= MAX_SEARCH_ANCHORS) anchors = denseAnchors;
+        }
         CorridorSearch search = searchAnchors(anchors);
         Map<Integer, List<EvChargerResponse>> liveChargersBySpan = search.chargersBySpan();
         Map<String, EvChargerResponse> liveChargersById = new HashMap<>();
@@ -86,7 +97,7 @@ public class RouteCorridorChargerFinder {
                         .sorted(Comparator.comparingDouble(OptimizationChargerCandidate::progressKm))
                         .toList()))
                 .toList();
-        return new OptimizationRoute(sortedSpans, search.failedSearches(), anchors.size() > MAX_SEARCH_ANCHORS);
+        return new OptimizationRoute(sortedSpans, search.failedSearches(), thinnedSearch);
     }
 
     /** Which leg between kept stops each movable charger currently sits on. */
@@ -298,11 +309,29 @@ public class RouteCorridorChargerFinder {
         }
     }
 
-    private List<SearchAnchor> buildAnchors(List<OptimizationRouteSpan> spans) {
+    /** Spacing that spreads about {@link #TARGET_SAMPLES_PER_SPAN} searches along a span, never wider than the base step. */
+    private double denseSampleIntervalKm(OptimizationRouteSpan span) {
+        double spanKm = geometryLengthKm(span.geometry());
+        if (spanKm <= 0) return SAMPLE_INTERVAL_KM;
+        return clamp(spanKm / TARGET_SAMPLES_PER_SPAN, MIN_DENSE_SAMPLE_INTERVAL_KM, SAMPLE_INTERVAL_KM);
+    }
+
+    private double geometryLengthKm(List<RouteCoordinate> geometry) {
+        double total = 0;
+        for (int index = 1; index < geometry.size(); index++) {
+            RouteCoordinate previous = geometry.get(index - 1);
+            RouteCoordinate current = geometry.get(index);
+            total += distanceKm(previous.lat(), previous.lng(), current.lat(), current.lng());
+        }
+        return total;
+    }
+
+    private List<SearchAnchor> buildAnchors(List<OptimizationRouteSpan> spans, ToDoubleFunction<OptimizationRouteSpan> intervalKm) {
         List<SearchAnchor> anchors = new ArrayList<>();
         for (OptimizationRouteSpan span : spans) {
             anchors.add(new SearchAnchor(span.index(), span.from().lat(), span.from().lng()));
-            double distanceToNextSampleKm = SAMPLE_INTERVAL_KM;
+            double sampleIntervalKm = intervalKm.applyAsDouble(span);
+            double distanceToNextSampleKm = sampleIntervalKm;
             List<RouteCoordinate> geometry = span.geometry();
             for (int index = 1; index < geometry.size(); index++) {
                 RouteCoordinate previous = geometry.get(index - 1);
@@ -319,7 +348,7 @@ public class RouteCorridorChargerFinder {
                             previous.lng() + ratio * (current.lng() - previous.lng())
                     ));
                     remainingSegmentKm -= distanceToNextSampleKm;
-                    distanceToNextSampleKm = SAMPLE_INTERVAL_KM;
+                    distanceToNextSampleKm = sampleIntervalKm;
                 }
                 distanceToNextSampleKm -= remainingSegmentKm;
             }

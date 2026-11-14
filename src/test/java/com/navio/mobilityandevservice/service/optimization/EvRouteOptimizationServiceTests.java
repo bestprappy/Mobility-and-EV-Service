@@ -553,6 +553,51 @@ class EvRouteOptimizationServiceTests {
     }
 
     @Test
+    void aShortCitySpanIsSearchedDenselyEnoughToReachChargersBetweenTheBaseSamplePoints() {
+        // Found in the real run: a 40 km Bangkok leg showed stations only at its ends and one point
+        // 30 km in, because each search returns just the 20 nearest stations, all within a couple of km.
+        var station = charger("mid-city", 13.0, 100.1108, 120, .9, false);
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenAnswer(call -> {
+                    double dLat = ((double) call.getArgument(0) - 13.0) * 110.574;
+                    double dLng = ((double) call.getArgument(1) - 100.1108) * 108.34;
+                    boolean withinSaturatedReach = Math.hypot(dLat, dLng) <= 2;
+                    return new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(withinSaturatedReach ? List.of(station) : List.of(), null);
+                });
+        var route = new OptimizationRoute(List.of(new OptimizationRouteSpan(0, request.stops().getFirst(), request.stops().getLast(), 40, 3_600,
+                List.of(new RouteCoordinate(100, 13), new RouteCoordinate(100.3692, 13)), List.of())));
+
+        var result = new RouteCorridorChargerFinder(service).populateCandidates(route, request, List.of());
+
+        assertThat(result.spans().getFirst().candidates()).extracting(candidate -> candidate.charger().id()).containsExactly("mid-city");
+        assertThat(result.thinnedChargerSearch()).isFalse();
+    }
+
+    @Test
+    void denseCitySamplingThatWouldOverrunTheSearchBudgetFallsBackWithoutReportingAThinnedSearch() {
+        var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var service = mock(com.navio.mobilityandevservice.service.EvChargerService.class);
+        when(service.nearby(org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(new com.navio.mobilityandevservice.domain.ev.EvChargerListResponse(List.of(), null));
+        List<OptimizationRouteSpan> spans = new ArrayList<>();
+        for (int index = 0; index < 6; index++) {
+            double lat = 13 + index * 0.1;
+            spans.add(new OptimizationRouteSpan(index, request.stops().getFirst(), request.stops().getLast(), 40, 3_600,
+                    List.of(new RouteCoordinate(100, lat), new RouteCoordinate(100.3692, lat)), List.of()));
+        }
+
+        var result = new RouteCorridorChargerFinder(service).populateCandidates(new OptimizationRoute(spans), request, List.of());
+
+        assertThat(result.thinnedChargerSearch()).isFalse();
+        org.mockito.Mockito.verify(service, org.mockito.Mockito.atMost(48)).nearby(org.mockito.ArgumentMatchers.anyDouble(),
+                org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.anyDouble(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
+    @Test
     void anOutageOfTheChargerSearchIsNotReportedAsARouteWithNoSafePlan() {
         var request = requestWithVehicleConnectors(EvConnectorType.CCS2);
         var routes = mock(RouteService.class);
