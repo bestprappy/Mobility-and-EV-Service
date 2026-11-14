@@ -17,6 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Stops Google Maps Platform calls once a month's free tier is used up. Every adapter call
  * consumes one unit before its request is sent; a refused unit means no request and no charge.
  * If the counter cannot be reached the call is refused too: spending is never the fallback.
+ * An administrator can ignore one month's limits (see {@link ProviderUsageStore#ignoreLimits});
+ * calls are then still counted but never refused for being over the limit.
  */
 @Slf4j
 @Component

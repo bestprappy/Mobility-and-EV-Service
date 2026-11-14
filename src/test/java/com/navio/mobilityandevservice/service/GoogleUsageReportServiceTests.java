@@ -19,11 +19,16 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -119,5 +124,67 @@ class GoogleUsageReportServiceTests {
         when(store.usageFor(any())).thenThrow(new DataAccessResourceFailureException("database down"));
 
         assertThatThrownBy(() -> service().currentMonth("ADMIN")).isInstanceOf(ProviderUnavailableException.class);
+    }
+
+    private static final UUID ADMIN_ID = UUID.fromString("00000000-0000-0000-0000-0000000000ad");
+
+    @Test
+    void reportsNoOverrideWhileCallsStopAtTheLimit() {
+        when(store.usageFor(NOVEMBER)).thenReturn(List.of());
+        when(store.limitsIgnoredSince(NOVEMBER)).thenReturn(Optional.empty());
+
+        assertThat(service().currentMonth("ADMIN").limitsIgnoredSince()).isNull();
+    }
+
+    @Test
+    void reportsWhenThisMonthsLimitsWereIgnored() {
+        Instant granted = Instant.parse("2026-11-08T12:00:00Z");
+        when(store.usageFor(NOVEMBER)).thenReturn(List.of());
+        when(store.limitsIgnoredSince(NOVEMBER)).thenReturn(Optional.of(granted));
+
+        assertThat(service().currentMonth("ADMIN").limitsIgnoredSince()).isEqualTo(granted);
+    }
+
+    @Test
+    void ignoringLimitsCoversOnlyTheCurrentPacificBillingMonthAndRecordsWhoChoseIt() {
+        Instant granted = Instant.parse("2026-11-09T05:00:00Z");
+        when(store.usageFor(NOVEMBER)).thenReturn(List.of());
+        when(store.limitsIgnoredSince(NOVEMBER)).thenReturn(Optional.of(granted));
+
+        GoogleUsageResponse report = service().updateLimitOverride("ADMIN", ADMIN_ID, true);
+
+        verify(store).ignoreLimits(NOVEMBER, ADMIN_ID);
+        verify(store, never()).restoreLimits(any());
+        assertThat(report.limitsIgnoredSince()).isEqualTo(granted);
+    }
+
+    @Test
+    void restoringLimitsStopsCallsAtTheLimitAgainThisMonth() {
+        when(store.usageFor(NOVEMBER)).thenReturn(List.of());
+        when(store.limitsIgnoredSince(NOVEMBER)).thenReturn(Optional.empty());
+
+        GoogleUsageResponse report = service().updateLimitOverride("OWNER", ADMIN_ID, false);
+
+        verify(store).restoreLimits(NOVEMBER);
+        verify(store, never()).ignoreLimits(any(), any());
+        assertThat(report.limitsIgnoredSince()).isNull();
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "USER", "MODERATOR"})
+    void onlyAdministratorsCanIgnoreLimitsAndNothingChangesForAnyoneElse(String roles) {
+        assertThatThrownBy(() -> service().updateLimitOverride(roles, ADMIN_ID, true))
+                .isInstanceOf(AdminAccessDeniedException.class);
+
+        verifyNoInteractions(store);
+    }
+
+    @Test
+    void anOverrideThatCannotBeSavedIsAnOutage() {
+        doThrow(new DataAccessResourceFailureException("database down")).when(store).ignoreLimits(any(), any());
+
+        assertThatThrownBy(() -> service().updateLimitOverride("ADMIN", ADMIN_ID, true))
+                .isInstanceOf(ProviderUnavailableException.class);
     }
 }

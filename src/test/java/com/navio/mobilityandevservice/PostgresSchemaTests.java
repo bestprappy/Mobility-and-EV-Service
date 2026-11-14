@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Import;
 import com.navio.mobilityandevservice.provider.usage.JdbcProviderUsageStore;
 
 import java.time.LocalDate;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -82,5 +83,30 @@ class PostgresSchemaTests {
         assertThat(usageStore.tryConsume(MONTH, "ROUTES", 1)).isFalse();
         assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isTrue();
         assertThat(usageStore.tryConsume(MONTH.plusMonths(1), "ROUTES", 1)).isTrue();
+    }
+
+    @Test
+    void anIgnoredMonthKeepsCountingPastTheLimitUntilLimitsAreRestored() {
+        assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isTrue();
+        assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isFalse();
+
+        usageStore.ignoreLimits(MONTH, UUID.randomUUID());
+        assertThat(usageStore.limitsIgnoredSince(MONTH)).isPresent();
+        assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isTrue();
+        assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isTrue();
+        assertThat(usageStore.usageFor(MONTH).getFirst().requestCount()).isEqualTo(3);
+
+        usageStore.restoreLimits(MONTH);
+        assertThat(usageStore.limitsIgnoredSince(MONTH)).isEmpty();
+        assertThat(usageStore.tryConsume(MONTH, "PLACE_DETAILS", 1)).isFalse();
+    }
+
+    @Test
+    void ignoringAMonthTwiceIsHarmlessAndLeavesOtherMonthsLimited() {
+        usageStore.ignoreLimits(MONTH, null);
+        usageStore.ignoreLimits(MONTH, null);
+
+        assertThat(usageStore.tryConsume(MONTH.plusMonths(1), "ROUTES", 1)).isTrue();
+        assertThat(usageStore.tryConsume(MONTH.plusMonths(1), "ROUTES", 1)).isFalse();
     }
 }

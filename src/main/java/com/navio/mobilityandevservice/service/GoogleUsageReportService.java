@@ -8,6 +8,7 @@ import com.navio.mobilityandevservice.provider.usage.GoogleFreeTierBudget;
 import com.navio.mobilityandevservice.provider.usage.GoogleUsageMeter;
 import com.navio.mobilityandevservice.provider.usage.ProviderUsageStore;
 import com.navio.mobilityandevservice.provider.usage.ProviderUsageStore.MeterUsage;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -21,10 +22,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-/** Reads the counters behind {@link GoogleFreeTierBudget}. Never calls Google, so viewing costs nothing. */
+/**
+ * Reads the counters behind {@link GoogleFreeTierBudget} and lets an administrator ignore this
+ * month's limits. Never calls Google, so viewing costs nothing.
+ */
+@Slf4j
 @Service
 public class GoogleUsageReportService {
 
@@ -59,8 +65,34 @@ public class GoogleUsageReportService {
     /** @param callerRoles the gateway's comma-separated {@code X-User-Roles}; null when none were asserted */
     public GoogleUsageResponse currentMonth(String callerRoles) {
         requireAdministrator(callerRoles);
+        return report(billingMonth());
+    }
 
-        YearMonth month = YearMonth.now(clock.withZone(GoogleFreeTierBudget.BILLING_ZONE));
+    /**
+     * Lets this month's Google calls continue past their limits, or stops them at the limits again.
+     * Calls keep being counted either way. The choice ends with the month, so limits return on their own.
+     */
+    public GoogleUsageResponse updateLimitOverride(String callerRoles, UUID callerId, boolean ignoreLimits) {
+        requireAdministrator(callerRoles);
+        YearMonth month = billingMonth();
+        try {
+            if (ignoreLimits) {
+                store.ignoreLimits(month.atDay(1), callerId);
+            } else {
+                store.restoreLimits(month.atDay(1));
+            }
+        } catch (DataAccessException exception) {
+            throw new ProviderUnavailableException("Google usage limits could not be changed", exception);
+        }
+        log.warn("Google free-tier limits for {} {} by user {}", month, ignoreLimits ? "ignored" : "restored", callerId);
+        return report(month);
+    }
+
+    private YearMonth billingMonth() {
+        return YearMonth.now(clock.withZone(GoogleFreeTierBudget.BILLING_ZONE));
+    }
+
+    private GoogleUsageResponse report(YearMonth month) {
         Map<String, MeterUsage> counted = read(month);
         List<GoogleUsageResponse.Meter> meters = Arrays.stream(GoogleUsageMeter.values())
                 .map(meter -> toMeter(meter, counted.get(meter.name())))
@@ -72,6 +104,7 @@ public class GoogleUsageReportService {
                 clock.instant(),
                 properties.enabled(),
                 placesDiscoveryEnabled,
+                limitsIgnoredSince(month),
                 meters
         );
     }
@@ -91,6 +124,14 @@ public class GoogleUsageReportService {
                     .collect(Collectors.toMap(MeterUsage::meter, Function.identity()));
         } catch (DataAccessException exception) {
             throw new ProviderUnavailableException("Google usage counts could not be read", exception);
+        }
+    }
+
+    private Instant limitsIgnoredSince(YearMonth month) {
+        try {
+            return store.limitsIgnoredSince(month.atDay(1)).orElse(null);
+        } catch (DataAccessException exception) {
+            throw new ProviderUnavailableException("Google usage limits could not be read", exception);
         }
     }
 
