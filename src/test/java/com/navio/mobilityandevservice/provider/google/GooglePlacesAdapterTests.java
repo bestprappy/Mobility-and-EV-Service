@@ -70,6 +70,36 @@ class GooglePlacesAdapterTests {
         server.verify();
     }
 
+    @Test void providerSearchAsksForOneProTierPageWithoutPhotosAndNeverReturnsCatalogueIds() {
+        server.expect(requestTo("https://places.googleapis.com/v1/places:searchText"))
+                .andExpect(header("X-Goog-FieldMask", org.hamcrest.Matchers.allOf(
+                        containsString("places.googleMapsUri"), containsString("nextPageToken"),
+                        org.hamcrest.Matchers.not(containsString("photos")),
+                        org.hamcrest.Matchers.not(containsString("rating")),
+                        org.hamcrest.Matchers.not(containsString("OpeningHours")))))
+                .andExpect(org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath("$.textQuery").value("museum in Thailand"))
+                .andExpect(org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath("$.pageSize").value(10))
+                .andExpect(org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath("$.regionCode").value("th"))
+                .andExpect(org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath("$.pageToken").doesNotExist())
+                .andRespond(withSuccess("""
+                  {"places":[
+                   {"id":"ChIJm","displayName":{"text":"Museum"},"formattedAddress":"Bangkok","location":{"latitude":13.7,"longitude":100.5},
+                    "primaryType":"museum","primaryTypeDisplayName":{"text":"Museum"},"googleMapsUri":"https://maps.google.com/?cid=7",
+                    "addressComponents":[{"shortText":"TH","longText":"Thailand","types":["country"]}]},
+                   {"id":"NAVIO:jim-thompson","displayName":{"text":"Spoof"},"location":{"latitude":13.7,"longitude":100.5}},
+                   {"id":"ChIJnoloc","displayName":{"text":"No location"}},
+                   {"id":"ChIJhttp","displayName":{"text":"Plain link"},"location":{"latitude":1,"longitude":2},"googleMapsUri":"http://maps.google.com"}
+                  ],"nextPageToken":"page2"}
+                  """, MediaType.APPLICATION_JSON));
+        var page = adapter.providerSearch("museum in Thailand", "TH", 10, "");
+        assertThat(page.items()).extracting(i -> i.providerPlaceId()).containsExactly("ChIJm", "ChIJhttp");
+        assertThat(page.items().getFirst().countryCode()).isEqualTo("TH");
+        assertThat(page.items().getFirst().googleMapsUri()).isEqualTo("https://maps.google.com/?cid=7");
+        assertThat(page.items().get(1).googleMapsUri()).isNull();
+        assertThat(page.nextPageToken()).isEqualTo("page2");
+        server.verify();
+    }
+
     @Test void exploreCountrySuggestionsDoNotAskForUnsupportedQueryPredictions() {
         server.expect(requestTo("https://places.googleapis.com/v1/places:autocomplete"))
                 .andExpect(content().string(containsString("\"includeQueryPredictions\":false")))
