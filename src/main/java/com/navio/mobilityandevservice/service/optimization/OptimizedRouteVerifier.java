@@ -78,6 +78,7 @@ final class OptimizedRouteVerifier {
             if (i > 0 && soc + 1e-9 < request.reserveSocPct()) {
                 return failure("The selected charging itinerary falls below reserve on its actual road route. No changes were applied; try another charger or a higher starting SOC.");
             }
+            if (i == stops.size() - 1 && request.minimumArrivalSocPct() != null && soc + 1e-9 < request.minimumArrivalSocPct()) return failure("The final destination arrival is below the minimum arrival battery.");
             var observed = request.stops().stream().filter(value -> value.itemId().equals(stop.point().id()))
                     .map(value -> value.observedSocPct()).filter(java.util.Objects::nonNull).findFirst().orElse(null);
             if (observed != null) soc = observed;

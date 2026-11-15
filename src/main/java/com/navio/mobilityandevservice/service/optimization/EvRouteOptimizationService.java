@@ -58,6 +58,9 @@ public class EvRouteOptimizationService {
     }
 
     public EvRouteOptimizationResponse optimize(EvRouteOptimizationRequest original) {
+        if (Boolean.TRUE.equals(original.insertionOnly())) {
+            original = new EvRouteOptimizationRequest(original.blockId(), original.stops().stream().map(this::protectEndpoint).toList(), original.vehicle(), original.startingSocPct(), original.reserveSocPct(), 100.0, original.maximumDetourKm(), original.precedingDays(), original.followingDays(), true, original.minimumArrivalSocPct());
+        }
         var checked = revalidator.check(original);
         var request = checked.request();
         var mustFix = closedStopThatBlocks(checked.closed(), request);
@@ -119,7 +122,7 @@ public class EvRouteOptimizationService {
             stops.set(stops.size() - 1, protectEndpoint(stops.getLast()));
         }
         return optimizeDay(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(),
-                preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm()),
+                preceding.socPct(), request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), List.of(), List.of(), request.insertionOnly(), request.minimumArrivalSocPct()),
                 request.followingDays(), request.precedingDays().size() + 1);
     }
 
@@ -177,6 +180,13 @@ public class EvRouteOptimizationService {
         }
 
         OptimizationRoute baseRoute = computeBaseRoute(request.blockId(), mandatoryStops);
+        if (Boolean.TRUE.equals(request.insertionOnly())) {
+            var unchanged = routeOptimizer.optimize(baseRoute, request);
+            if (unchanged.feasible()) {
+                var verified = OptimizedRouteVerifier.verify(baseRoute, request, unchanged, routeService);
+                if (verified.feasible()) return feasible(request, baseRoute, verified, List.of());
+            }
+        }
         OptimizationRoute routeWithCandidates = chargerFinder.populateCandidates(
                 baseRoute,
                 request,
@@ -199,6 +209,7 @@ public class EvRouteOptimizationService {
                 if (firstRejected == null) firstRejected = verified;
                 continue;
             }
+            if (Boolean.TRUE.equals(request.insertionOnly())) return feasible(request, routeWithCandidates, verified, List.of("Later days retain their itineraries; their projected battery levels will be recalculated."));
             var later = laterDays(request, verified, followingDays);
             List<String> unchecked = uncheckedDayWarning(later, selectedDayNumber, followingDays.size());
             if (later.failure() == null) return feasible(request, routeWithCandidates, verified, unchecked);
@@ -235,7 +246,7 @@ public class EvRouteOptimizationService {
                 result.totalChargingMinutes(),
                 route.failedChargerSearches() > 0
                         ? "Charger search is temporarily unavailable, so a charging plan could not be found. Try again shortly."
-                        : "No safe compatible charging plan could be found.",
+                        : "No compatible charging stations are available for automatic insertion on a feasible route.",
                 result.warnings()
         );
     }
@@ -245,7 +256,7 @@ public class EvRouteOptimizationService {
         List<EvPlanOperation> operations = buildOperations(request, result.chargeStops());
         long changes = operations.stream().filter(operation -> changesThePlan(operation, request)).count();
         String message = changes == 0
-                ? "The current charging plan is already efficient."
+                ? (Boolean.TRUE.equals(request.insertionOnly()) ? "No additional charging stops are needed for this day." : "The current charging plan is already efficient.")
                 : "Found " + changes + " EV route change" + (changes == 1 ? "." : "s.");
         List<String> warnings = new ArrayList<>(result.warnings());
         warnings.addAll(extraWarnings);

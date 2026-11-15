@@ -73,7 +73,7 @@ public class SavedChargerRevalidator {
             following.add(new EvRouteOptimizationRequest.Day(day.blockId(), refresh(day.stops(), live, selectedDayNumber + index + 1, false, closed)));
         }
         return new Outcome(new EvRouteOptimizationRequest(request.blockId(), stops, request.vehicle(), request.startingSocPct(),
-                request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), preceding, following),
+                request.reserveSocPct(), request.targetSocPct(), request.maximumDetourKm(), preceding, following, request.insertionOnly(), request.minimumArrivalSocPct()),
                 closed, ids.size() - live.size());
     }
 

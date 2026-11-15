@@ -97,6 +97,10 @@ public class RouteCorridorChargerFinder {
                         .sorted(Comparator.comparingDouble(OptimizationChargerCandidate::progressKm))
                         .toList()))
                 .toList();
+        if (Boolean.TRUE.equals(request.insertionOnly())) {
+            Set<String> existing = request.stops().stream().filter(EvRouteStopRequest::chargerStop).map(stop -> stop.charger().id()).collect(java.util.stream.Collectors.toSet());
+            sortedSpans = sortedSpans.stream().map(span -> span.withCandidates(span.candidates().stream().filter(candidate -> !existing.contains(candidate.charger().id())).toList())).toList();
+        }
         return new OptimizationRoute(sortedSpans, search.failedSearches(), thinnedSearch);
     }
 

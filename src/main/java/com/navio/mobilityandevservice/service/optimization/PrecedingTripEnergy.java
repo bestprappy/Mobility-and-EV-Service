@@ -99,7 +99,7 @@ final class PrecedingTripEnergy {
         if (uncertainOrInfeasible || forward == null) {
             return new State(null, "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.", shortfall, uncheckedDayIndex);
         }
-        if (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct())) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.", shortfall, uncheckedDayIndex);
+        if (!Boolean.TRUE.equals(request.insertionOnly()) && (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct()))) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.", shortfall, uncheckedDayIndex);
         return new State(forward, null, false, uncheckedDayIndex);
     }
 

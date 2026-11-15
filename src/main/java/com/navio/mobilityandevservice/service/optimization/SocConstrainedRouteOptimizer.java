@@ -155,7 +155,8 @@ public class SocConstrainedRouteOptimizer {
                     DriveEdge edge = driveEdge(span, currentNode, nextNode);
                     double consumedSocPct = consumedSocPct(edge.distanceKm(), request.vehicle());
                     double arrivalSocPct = departure.socPct() - consumedSocPct;
-                    if (arrivalSocPct + EPSILON < request.reserveSocPct()) {
+                    if (arrivalSocPct + EPSILON < Math.max(request.reserveSocPct(),
+                            nextIndex == nodes.size() - 1 && span.to().itemId().equals(request.stops().getLast().itemId()) && request.minimumArrivalSocPct() != null ? request.minimumArrivalSocPct() : 0)) {
                         continue;
                     }
 
@@ -166,7 +167,7 @@ public class SocConstrainedRouteOptimizer {
                             currentLabel,
                             departure,
                             arrivalSocPct,
-                            edge
+                            edge, Boolean.TRUE.equals(request.insertionOnly())
                     );
                     admit(nextIndex, nextLabel, bestByNode, queue);
                 }
@@ -197,7 +198,7 @@ public class SocConstrainedRouteOptimizer {
             SearchLabel currentLabel,
             DepartureOption departure,
             double arrivalSocPct,
-            DriveEdge edge
+            DriveEdge edge, boolean insertionOnly
     ) {
         List<PlannedChargeStop> chargeStops = currentLabel.chargeStops();
         // Only saved stops are tracked: one can project onto several spans but is one visit. A span's nodes
@@ -219,11 +220,11 @@ public class SocConstrainedRouteOptimizer {
                     departure.chargeMinutes(),
                     currentNode.candidate().deviationKm() * 2
             ));
-            if (currentNode.candidate().existingItemId() != null) {
+            if (insertionOnly || currentNode.candidate().existingItemId() != null) {
                 visitedChargerIds = new HashSet<>(currentLabel.visitedChargerIds());
-                visitedChargerIds.add(currentNode.candidate().existingItemId());
+                visitedChargerIds.add(currentNode.candidate().existingItemId() == null ? currentNode.candidate().charger().id() : currentNode.candidate().existingItemId());
             }
-            chargingCostSeconds += CHARGING_STOP_OVERHEAD_SECONDS + riskPenaltySeconds(currentNode.candidate().charger());
+            chargingCostSeconds += (insertionOnly && currentNode.candidate().existingItemId() == null ? 1_000_000_000 : 0) + CHARGING_STOP_OVERHEAD_SECONDS + riskPenaltySeconds(currentNode.candidate().charger());
         }
 
         return new SearchLabel(
@@ -251,6 +252,14 @@ public class SocConstrainedRouteOptimizer {
             return options;
         }
 
+        if (Boolean.TRUE.equals(request.insertionOnly()) && candidate.existingItemId() != null) {
+            return List.of(savedPlanOption(candidate, label, request, noCharge));
+        }
+        if (Boolean.TRUE.equals(request.insertionOnly())) {
+            if (label.visitedChargerIds().contains(candidate.charger().id())) return List.of();
+            Double minutes = chargeMinutes(label.socPct(), 100, candidate.charger(), request.vehicle());
+            return minutes == null ? List.of() : List.of(new DepartureOption(100, minutes, false));
+        }
         // An explicit per-stop target is an itinerary constraint, including a 100% target.
         Integer stopTarget = request.stops().stream()
                 .filter(stop -> stop.itemId().equals(candidate.existingItemId()))

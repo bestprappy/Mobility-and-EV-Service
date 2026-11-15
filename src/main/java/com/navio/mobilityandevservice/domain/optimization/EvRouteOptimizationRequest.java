@@ -14,12 +14,18 @@ public record EvRouteOptimizationRequest(
         @NotNull @Size(min = 2, max = 25) List<@Valid EvRouteStopRequest> stops,
         @NotNull @Valid EvVehicleSpec vehicle,
         @NotNull @DecimalMin("0.0") @DecimalMax("100.0") Double startingSocPct,
-        @NotNull @DecimalMin("1.0") @DecimalMax("40.0") Double reserveSocPct,
-        @NotNull @DecimalMin("20.0") @DecimalMax("95.0") Double targetSocPct,
+        @NotNull @DecimalMin("1.0") @DecimalMax("100.0") Double reserveSocPct,
+        @NotNull @DecimalMin("20.0") @DecimalMax("100.0") Double targetSocPct,
         @NotNull @DecimalMin("1.0") @DecimalMax("50.0") Double maximumDetourKm,
         @Size(max = 366) List<@Valid Day> precedingDays,
-        @Size(max = 366) List<@Valid Day> followingDays
+        @Size(max = 366) List<@Valid Day> followingDays,
+        Boolean insertionOnly,
+        @DecimalMin("1.0") @DecimalMax("100.0") Double minimumArrivalSocPct
 ) {
+    public EvRouteOptimizationRequest(String blockId, List<EvRouteStopRequest> stops, EvVehicleSpec vehicle,
+            Double startingSocPct, Double reserveSocPct, Double targetSocPct, Double maximumDetourKm, List<Day> precedingDays, List<Day> followingDays) {
+        this(blockId, stops, vehicle, startingSocPct, reserveSocPct, targetSocPct, maximumDetourKm, precedingDays, followingDays, false, null);
+    }
     public EvRouteOptimizationRequest(String blockId, List<EvRouteStopRequest> stops, EvVehicleSpec vehicle,
             Double startingSocPct, Double reserveSocPct, Double targetSocPct, Double maximumDetourKm, List<Day> precedingDays) {
         this(blockId, stops, vehicle, startingSocPct, reserveSocPct, targetSocPct, maximumDetourKm, precedingDays, List.of());

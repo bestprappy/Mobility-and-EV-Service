@@ -1006,6 +1006,47 @@ class EvRouteOptimizationServiceTests {
         });
     }
 
+    @Test
+    void insertionOnlyChargesToFullAndHonorsMinimumArrival() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(),
+                90, 3600, List.of(candidate(charger("new", 13, 101, 180, .9, false), 30, 0, null)))));
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                50.0, 10.0, 100.0, 20.0, List.of(), List.of(), true, 40.0);
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).hasSize(1);
+        assertThat(result.chargeStops().getFirst().departureSocPct()).isEqualTo(100);
+        assertThat(result.finalSocPct()).isGreaterThanOrEqualTo(40);
+        var satisfied = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                80.0, 10.0, 100.0, 20.0, List.of(), List.of(), true, 40.0);
+        assertThat(new SocConstrainedRouteOptimizer().optimize(route, satisfied).chargeStops()).isEmpty();
+    }
+
+    @Test
+    void insertionOnlyPreservesSavedTargetWithoutAnUpdateOperation() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var saved = new EvRouteStopRequest("saved", "Saved charger", 13, 101,
+                charger("saved-station", 13, 101, 180, .9, false), true, EvChargerSelectionSource.MANUAL, 65);
+        var request = new EvRouteOptimizationRequest(base.blockId(), List.of(base.stops().getFirst(), saved, base.stops().getLast()),
+                base.vehicle(), 80.0, 10.0, 100.0, 20.0, List.of(), List.of(), true, 20.0);
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), saved, 90, 3600, List.of()),
+                span(1, saved, base.stops().getLast(), 60, 2400, List.of())));
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).isEmpty();
+        assertThat(result.finalSocPct()).isEqualTo(45);
+    }
+
+    @Test
+    void insertionOnlyReportsInfeasibleWhenNoStationCanMeetArrival() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                50.0, 10.0, 100.0, 20.0, List.of(), List.of(), true, 40.0);
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(), 90, 3600, List.of())));
+        assertThat(new SocConstrainedRouteOptimizer().optimize(route, request).feasible()).isFalse();
+    }
+
     private EvRouteOptimizationRequest requestWithVehicleConnectors(EvConnectorType... connectors) {
         return new EvRouteOptimizationRequest(
                 "day-1",
