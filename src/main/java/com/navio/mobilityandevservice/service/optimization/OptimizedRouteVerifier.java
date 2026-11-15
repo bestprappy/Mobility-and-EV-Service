@@ -75,7 +75,11 @@ final class OptimizedRouteVerifier {
             if (i > 0 && soc < -1e-9) {
                 return failure("The selected charging stop or destination is unreachable on its actual road route with the available battery.");
             }
-            if (i > 0 && soc + 1e-9 < request.reserveSocPct()) {
+            boolean finalDestination = i == stops.size() - 1;
+            boolean chargerArrival = stop.charge() != null || request.stops().stream()
+                    .anyMatch(s -> s.chargerStop() && s.itemId().equals(stop.point().id()));
+            if (i > 0 && soc + 1e-9 < AutoAddArrivalPolicy.requiredArrivalSocPct(request, chargerArrival, finalDestination)) {
+                if (Boolean.TRUE.equals(request.insertionOnly()) && finalDestination) return failure("The final destination arrival is below the minimum arrival battery.");
                 return failure("The selected charging itinerary falls below reserve on its actual road route. No changes were applied; try another charger or a higher starting SOC.");
             }
             if (i == stops.size() - 1 && request.minimumArrivalSocPct() != null && soc + 1e-9 < request.minimumArrivalSocPct()) return failure("The final destination arrival is below the minimum arrival battery.");
@@ -114,7 +118,7 @@ final class OptimizedRouteVerifier {
                 }
             }
         }
-        if (soc + 1e-9 < request.reserveSocPct()) return failure("The final observed battery state is below the selected reserve; review the final stop before applying a charging plan.");
+        if (!Boolean.TRUE.equals(request.insertionOnly()) && soc + 1e-9 < request.reserveSocPct()) return failure("The final observed battery state is below the selected reserve; review the final stop before applying a charging plan.");
         List<String> warnings = new ArrayList<>(search.warnings());
         warnings.remove(SocConstrainedRouteOptimizer.APPROXIMATE_DISTANCE_WARNING);
         warnings.add("Battery figures are nominal estimates, and your arrival reserve is kept separately.");

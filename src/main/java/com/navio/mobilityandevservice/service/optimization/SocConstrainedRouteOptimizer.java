@@ -170,8 +170,10 @@ public class SocConstrainedRouteOptimizer {
                     DriveEdge edge = driveEdge(span, currentNode, nextNode);
                     double consumedSocPct = consumedSocPct(edge.distanceKm(), request.vehicle());
                     double arrivalSocPct = departure.socPct() - consumedSocPct;
-                    if (arrivalSocPct + EPSILON < Math.max(request.reserveSocPct(),
-                            nextIndex == nodes.size() - 1 && span.to().itemId().equals(request.stops().getLast().itemId()) && request.minimumArrivalSocPct() != null ? request.minimumArrivalSocPct() : 0)) {
+                    boolean spanEnd = nextIndex == nodes.size() - 1;
+                    boolean finalDestination = spanEnd && span.to().itemId().equals(request.stops().getLast().itemId());
+                    boolean charger = nextNode.candidate() != null || (spanEnd && span.to().chargerStop());
+                    if (arrivalSocPct + EPSILON < AutoAddArrivalPolicy.requiredArrivalSocPct(request, charger, finalDestination)) {
                         continue;
                     }
 
