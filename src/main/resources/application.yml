@@ -12,6 +12,18 @@ navio:
     enabled: false
     requests-per-minute: 60
     max-concurrent: 4
+  # Places Release 2: explicit "Search beyond Navio's catalogue" (GET /v1/geo/place-searches).
+  # Separate from discovery above, which stays off. One Text Search call per click, no photos,
+  # signed-in users only. Keep enabled false until the owner sets a spend ceiling AND Google
+  # Cloud daily quotas for Text Search; the daily limits below are per instance, in memory.
+  places:
+    provider-search:
+      enabled: ${NAVIO_PLACES_PROVIDER_SEARCH_ENABLED:false}
+      requests-per-minute: 20
+      max-concurrent: 2
+      max-pages: 3
+      daily-limit: 30
+      per-user-daily-limit: 10
   # Google calls stop for the rest of the month once a meter reaches its limit (ev.provider_monthly_usage).
   # Defaults sit ~5% under each free tier; override with monthly-limits.<METER> (see GoogleUsageMeter).
   google:

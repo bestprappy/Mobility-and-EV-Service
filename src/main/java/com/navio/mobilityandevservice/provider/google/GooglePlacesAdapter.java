@@ -13,6 +13,7 @@ import com.navio.mobilityandevservice.domain.place.PlaceAutocompleteResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceDetailResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceLocationResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceProviderName;
+import com.navio.mobilityandevservice.domain.place.PlaceProviderSearchResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceSearchResponse;
 import com.navio.mobilityandevservice.domain.place.PlaceSearchScope;
 import com.navio.mobilityandevservice.domain.place.PlaceSuggestionResponse;
@@ -82,6 +83,17 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             "places.rating",
             "places.userRatingCount",
             "places.evChargeOptions"
+    );
+    private static final String PROVIDER_SEARCH_FIELD_MASK = String.join(",",
+            "places.id",
+            "places.displayName",
+            "places.formattedAddress",
+            "places.location",
+            "places.primaryType",
+            "places.primaryTypeDisplayName",
+            "places.addressComponents",
+            "places.googleMapsUri",
+            "nextPageToken"
     );
     private static final List<String> EV_CHARGER_TYPES = List.of("electric_vehicle_charging_station");
     private static final List<String> DESTINATION_TYPES = List.of("(regions)");
@@ -245,6 +257,41 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
         return new ExplorePage(safeList(response.places()).stream().filter(Objects::nonNull)
                 .filter(p -> p.id()!=null && p.location()!=null)
                 .map(p -> new PlaceExploreCandidate(candidate(p,null),safeList(p.types()))).toList(),response.nextPageToken());
+    }
+
+    public record ProviderSearchPage(List<PlaceProviderSearchResponse.Item> items, String nextPageToken) {}
+
+    /**
+     * Places Release 2 explicit search: one Text Search request, Pro-tier fields only. No photos,
+     * ratings, hours or editorial fields, so no follow-up photo or detail calls are needed.
+     */
+    public ProviderSearchPage providerSearch(String textQuery, String regionCode, int pageSize, String pageToken) {
+        var response = execute(GoogleUsageMeter.PLACES_TEXT_SEARCH, "provider search", () -> restClient.post()
+                .uri("/places:searchText")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("X-Goog-FieldMask", PROVIDER_SEARCH_FIELD_MASK)
+                .body(new GoogleProviderSearchRequest(textQuery, pageSize, blankToNull(pageToken),
+                        regionCode == null ? null : regionCode.toLowerCase(Locale.ROOT)))
+                .retrieve()
+                .body(GooglePlaceListResponse.class));
+        var items = safeList(response.places()).stream()
+                .filter(Objects::nonNull)
+                .filter(p -> p.id() != null && !p.id().isBlank() && p.location() != null && text(p.displayName()) != null)
+                // Catalogue identities are Navio-owned; a provider answer may never claim one.
+                .filter(p -> !p.id().regionMatches(true, 0, "NAVIO:", 0, 6))
+                .map(p -> {
+                    var location = GooglePlaceLocationMapper.map(p.addressComponents());
+                    return new PlaceProviderSearchResponse.Item(p.id(), text(p.displayName()), p.formattedAddress(),
+                            p.location().latitude(), p.location().longitude(), text(p.primaryTypeDisplayName()),
+                            p.primaryType(), location == null ? null : location.countryCode(),
+                            location == null ? null : location.city(), httpsOrNull(p.googleMapsUri()));
+                })
+                .toList();
+        return new ProviderSearchPage(items, response.nextPageToken());
+    }
+
+    private static String httpsOrNull(String value) {
+        return value != null && value.startsWith("https://") ? value : null;
     }
 
     public List<PlaceExploreSuggestion> exploreSuggestions(String query, String country) {
@@ -672,7 +719,8 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
             GoogleEvChargeOptions evChargeOptions,
             List<GoogleAddressComponent> addressComponents,
             GoogleText editorialSummary,
-            List<String> types
+            List<String> types,
+            String googleMapsUri
     ) {
     }
 
@@ -702,6 +750,8 @@ public class GooglePlacesAdapter implements PlaceProvider, EvChargerProvider {
     private record GoogleOpeningHours(Boolean openNow, List<String> weekdayDescriptions) {
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record GoogleProviderSearchRequest(String textQuery, int pageSize, String pageToken, String regionCode) {}
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private record GoogleExploreRequest(String textQuery, int pageSize, String pageToken, String includedType,
             boolean strictTypeFiltering, String regionCode) {}

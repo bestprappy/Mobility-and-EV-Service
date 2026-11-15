@@ -39,6 +39,27 @@ public class GlobalExceptionHandler {
                         "Try again shortly", null));
     }
 
+    @ExceptionHandler(ProviderSearchDisabledException.class)
+    ResponseEntity<ApiErrorResponse> handleProviderSearchDisabled(ProviderSearchDisabledException exception) {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "Search beyond Navio's catalogue is not available",
+                "This feature is turned off. Navio's catalogue is still available.", null);
+    }
+
+    @ExceptionHandler(ProviderSearchLimitException.class)
+    ResponseEntity<ApiErrorResponse> handleProviderSearchLimit(ProviderSearchLimitException exception) {
+        String error = switch (exception.scope()) {
+            case USER_DAY -> "You have used today's searches beyond the catalogue. Try again tomorrow.";
+            case DAY -> "Today's searches beyond the catalogue are used up. Try again tomorrow.";
+            case MONTH -> "This month's searches beyond the catalogue are used up.";
+        };
+        return response(HttpStatus.TOO_MANY_REQUESTS, "Search beyond Navio's catalogue has reached its limit", error, null);
+    }
+
+    @ExceptionHandler(AuthenticationRequiredException.class)
+    ResponseEntity<ApiErrorResponse> handleAuthenticationRequired(AuthenticationRequiredException exception) {
+        return response(HttpStatus.UNAUTHORIZED, exception.getMessage(), "Sign in and try again", null);
+    }
+
     @ExceptionHandler(ProviderUnavailableException.class)
     ResponseEntity<ApiErrorResponse> handleProviderUnavailable(ProviderUnavailableException exception) {
         log.warn("Mobility provider is unavailable", exception);
