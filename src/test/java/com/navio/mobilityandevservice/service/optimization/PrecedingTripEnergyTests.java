@@ -51,7 +51,21 @@ class PrecedingTripEnergyTests {
         var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",102,80.0)))));
         var result = PrecedingTripEnergy.resolve(request, routes(300000, RouteSegmentStatus.ROUTED));
         assertThat(result.socPct()).isNull();
-        assertThat(result.failure()).contains("unreachable");
+        assertThat(result.failure()).contains("Day 1 runs out of battery").contains("Use Auto Add on Day 1 first");
+    }
+    @Test void theFirstEarlierDayThatRunsOutIsNamedSoDaysArePlannedInOrder() {
+        var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",100.5,70.0))),
+                new EvRouteOptimizationRequest.Day("day-2", List.of(stop("c",100.5,null), stop("d",102,null)))));
+        RouteService routes = mock(RouteService.class);
+        when(routes.computeDirections(any())).thenAnswer(call -> {
+            DirectionsRequest directions = call.getArgument(0);
+            var group = directions.groups().getFirst();
+            long meters = "day-2".equals(group.blockId()) ? 400_000 : 10_000;
+            var points = group.points();
+            return new DirectionsResponse(List.of(new RouteSegmentResponse("leg", group.blockId(), points.get(0).id(), points.get(1).id(),
+                    "from", "to", RouteSegmentStatus.ROUTED, null, meters, 600L, null)));
+        });
+        assertThat(PrecedingTripEnergy.resolve(request, routes).failure()).contains("Day 2 runs out of battery");
     }
     @Test void fallbackRoutesCannotCertifyPriorDayState() {
         var request = request(List.of(new EvRouteOptimizationRequest.Day("day-1", List.of(stop("a",100,null), stop("b",102,null)))));

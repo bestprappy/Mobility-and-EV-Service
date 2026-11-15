@@ -42,7 +42,7 @@ public class SocConstrainedRouteOptimizer {
         List<SearchLabel> labels = List.of(SearchLabel.start(request.startingSocPct()));
         List<String> warnings = new ArrayList<>();
         if (route.spans().stream().anyMatch(span -> !"ROUTED".equals(span.distanceQuality()) || !span.candidates().isEmpty())) warnings.add(APPROXIMATE_DISTANCE_WARNING);
-        if ("RATED_RANGE".equals(request.vehicle().resolvedModel().modelKind())) warnings.add("Rated-range estimate: this is a preview only, so these charging stops can't be applied.");
+        if ("RATED_RANGE".equals(request.vehicle().resolvedModel().modelKind())) warnings.add("Battery use is a NAVIO Estimate from the rated range. Real use varies with speed, load and weather.");
 
         if (consumedSocPct(1, request.vehicle()) == null) return new OptimizationSearchResult(false, null, 0, 0, List.of(), List.of("Canonical SoC unavailable: suitable energy model and usable capacity are required."));
         for (OptimizationRouteSpan span : route.spans()) {
@@ -57,6 +57,15 @@ public class SocConstrainedRouteOptimizer {
         }
 
         List<SearchLabel> ranked = labels.stream().sorted(Comparator.comparingDouble(SearchLabel::costSeconds)).toList();
+        // New stations are not tracked per label (that stops labels pruning each other), so a plan that
+        // returns to the same new station on another leg is filtered here instead.
+        if (Boolean.TRUE.equals(request.insertionOnly())) {
+            ranked = ranked.stream().filter(SocConstrainedRouteOptimizer::visitsEachNewStationOnce).toList();
+            if (ranked.isEmpty()) {
+                warnings.add("No safe compatible charging plan was found without visiting the same station twice.");
+                return new OptimizationSearchResult(false, null, 0, 0, List.of(), warnings);
+            }
+        }
         SearchLabel best = ranked.getFirst();
         List<OptimizationSearchResult> alternatives = alternativesTo(best, ranked, route, request).stream()
                 .filter(label -> label.socPct() > best.socPct() + EPSILON)
@@ -112,6 +121,12 @@ public class SocConstrainedRouteOptimizer {
         return labels.stream()
                 .filter(label -> sameStations(label, best) && label.socPct() > best.socPct() + EPSILON)
                 .sorted(Comparator.comparingDouble(SearchLabel::socPct)).toList();
+    }
+
+    private static boolean visitsEachNewStationOnce(SearchLabel label) {
+        var newStations = label.chargeStops().stream().filter(stop -> stop.candidate().existingItemId() == null)
+                .map(stop -> stop.candidate().charger().id()).toList();
+        return newStations.size() == new HashSet<>(newStations).size();
     }
 
     private static List<SearchLabel> sampleKeepingLast(List<SearchLabel> labels, int limit) {
@@ -220,9 +235,9 @@ public class SocConstrainedRouteOptimizer {
                     departure.chargeMinutes(),
                     currentNode.candidate().deviationKm() * 2
             ));
-            if (insertionOnly || currentNode.candidate().existingItemId() != null) {
+            if (currentNode.candidate().existingItemId() != null) {
                 visitedChargerIds = new HashSet<>(currentLabel.visitedChargerIds());
-                visitedChargerIds.add(currentNode.candidate().existingItemId() == null ? currentNode.candidate().charger().id() : currentNode.candidate().existingItemId());
+                visitedChargerIds.add(currentNode.candidate().existingItemId());
             }
             chargingCostSeconds += (insertionOnly && currentNode.candidate().existingItemId() == null ? 1_000_000_000 : 0) + CHARGING_STOP_OVERHEAD_SECONDS + riskPenaltySeconds(currentNode.candidate().charger());
         }
@@ -256,7 +271,6 @@ public class SocConstrainedRouteOptimizer {
             return List.of(savedPlanOption(candidate, label, request, noCharge));
         }
         if (Boolean.TRUE.equals(request.insertionOnly())) {
-            if (label.visitedChargerIds().contains(candidate.charger().id())) return List.of();
             Double minutes = chargeMinutes(label.socPct(), 100, candidate.charger(), request.vehicle());
             return minutes == null ? List.of() : List.of(new DepartureOption(100, minutes, false));
         }
@@ -373,7 +387,7 @@ public class SocConstrainedRouteOptimizer {
         Double best = null;
         for (EvConnectorType connector : charger.connectorTypes()) {
             if (connector == EvConnectorType.OTHER || !vehicle.connectorTypes().contains(connector)) continue;
-            Double carLimit = DC_CONNECTORS.contains(connector) ? vehicle.maxDcKw() : vehicle.maxAcKw();
+            Double carLimit = carLimitKw(connector, vehicle);
             Double plug = charger.connectorPowerKw().get(connector);
             if (plug == null && charger.connectorPowerKw().isEmpty() && oneType) plug = charger.maxKw();
             if (!CanonicalEnergy.positive(carLimit) || !CanonicalEnergy.positive(plug)) continue;
@@ -381,6 +395,17 @@ public class SocConstrainedRouteOptimizer {
             if (best == null || usable > best) best = usable;
         }
         return best;
+    }
+
+    /** Conservative speeds for a car whose limits were never entered, so its chargers are not all dropped. */
+    static final double UNKNOWN_CAR_AC_KW = 7.0;
+    static final double UNKNOWN_CAR_DC_KW = 50.0;
+
+    private static Double carLimitKw(EvConnectorType connector, EvVehicleSpec vehicle) {
+        boolean dc = DC_CONNECTORS.contains(connector);
+        Double declared = dc ? vehicle.maxDcKw() : vehicle.maxAcKw();
+        // Unknown (null) uses a conservative speed; 0 means the car cannot charge on that plug.
+        return declared != null ? declared : dc ? UNKNOWN_CAR_DC_KW : UNKNOWN_CAR_AC_KW;
     }
 
     static boolean compatible(EvChargerResponse charger, EvVehicleSpec vehicle) {

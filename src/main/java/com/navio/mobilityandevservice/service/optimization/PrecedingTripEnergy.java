@@ -40,6 +40,7 @@ final class PrecedingTripEnergy {
         boolean unknownFirst = false;
         boolean stoppedAtGap = false;
         Integer uncheckedDayIndex = null;
+        Integer firstProblemDayIndex = null;
         for (int dayIndex = 0; dayIndex < request.precedingDays().size() && !stoppedAtGap; dayIndex++) {
             var day = request.precedingDays().get(dayIndex);
             boolean gap = previous != null && !day.stops().isEmpty() && !samePosition(previous, day.stops().getFirst());
@@ -76,8 +77,10 @@ final class PrecedingTripEnergy {
                         km, km == null ? "UNAVAILABLE" : "ROUTED", forward, stop.observedSocPct(),
                         charging(stop, request.vehicle()), request.reserveSocPct()));
                 // An observation may restore onward state, but cannot certify an unreachable or unknown earlier leg.
-                uncertainOrInfeasible |= !"FEASIBLE".equals(result.predictedLegFeasibility())
+                boolean problem = !"FEASIBLE".equals(result.predictedLegFeasibility())
                         || result.departureSocPct() == null || result.nominalChargeMinutes() == null;
+                if (problem && !uncertainOrInfeasible) firstProblemDayIndex = dayIndex;
+                uncertainOrInfeasible |= problem;
                 // Starting SoC is not an arrival. Check every actual prior driving leg before observations.
                 belowReserve |= i > 0 && "BELOW_RESERVE".equals(result.predictedArrivalReserveStatus());
                 // Whatever follows an unreachable leg is unknown too, so only the first problem classifies the failure.
@@ -97,7 +100,11 @@ final class PrecedingTripEnergy {
             return new State(null, "The selected day starts at a different location from the preceding day, so its starting battery is unknown. Set where it starts, or record the battery level at its first stop, before optimizing.", false);
         }
         if (uncertainOrInfeasible || forward == null) {
-            return new State(null, "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.", shortfall, uncheckedDayIndex);
+            // Days are planned in order: name the earlier day to fix first rather than a vague itinerary.
+            String message = !stopAtGap && firstProblemDayIndex != null
+                    ? "Day " + (firstProblemDayIndex + 1) + " runs out of battery or has an unknown battery level, so this day's starting battery can't be worked out. Use Auto Add on Day " + (firstProblemDayIndex + 1) + " first, then plan this day."
+                    : "The preceding itinerary has an unavailable or unreachable battery state. Check its route and charging stops before optimizing this day.";
+            return new State(null, message, shortfall, uncheckedDayIndex);
         }
         if (!Boolean.TRUE.equals(request.insertionOnly()) && (belowReserve || (previous != null && forward + 1e-9 < request.reserveSocPct()))) return new State(null, "The preceding itinerary falls below the selected arrival reserve. Review its charging plan before optimizing this day.", shortfall, uncheckedDayIndex);
         return new State(forward, null, false, uncheckedDayIndex);

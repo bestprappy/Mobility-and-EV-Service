@@ -1047,6 +1047,59 @@ class EvRouteOptimizationServiceTests {
         assertThat(new SocConstrainedRouteOptimizer().optimize(route, request).feasible()).isFalse();
     }
 
+    @Test
+    void autoAddOnADenseCorridorNeedingTwoStopsProducesAPlanInsteadOfHittingTheSearchLimit() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var candidates = new ArrayList<OptimizationChargerCandidate>();
+        for (int i = 1; i <= 40; i++) {
+            candidates.add(candidate(charger("real-" + i, 13, 100 + i * .05, 40 + (i * 37) % 200, .82, false), i * 12, (i % 5) * .7, null));
+        }
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                80.0, 12.0, 100.0, 20.0, List.of(), List.of(), true, 20.0);
+        var result = new SocConstrainedRouteOptimizer().optimize(new OptimizationRoute(List.of(new OptimizationRouteSpan(0,
+                request.stops().getFirst(), request.stops().getLast(), 480, 21_600, List.of(), candidates))), request);
+
+        assertThat(result.warnings()).noneMatch(warning -> warning.contains("search limit"));
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).hasSize(2);
+        assertThat(result.chargeStops()).allMatch(stop -> stop.departureSocPct() == 100);
+        assertThat(result.chargeStops().stream().map(stop -> stop.candidate().charger().id()).distinct()).hasSize(2);
+    }
+
+    @Test
+    void autoAddPlansChargingForARatedRangeEstimateWithoutAPreviewOnlyWarning() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var ratedRange = new EvVehicleSpec(60.0, null, 11.0, 180.0, List.of(EvConnectorType.CCS2),
+                new CanonicalEnergy.Model("RATED_RANGE", null, 60.0, 300.0));
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(),
+                270, 3600, List.of(candidate(charger("new", 13, 101, 180, .9, false), 120, 0, null)))));
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), ratedRange,
+                80.0, 12.0, 100.0, 20.0, List.of(), List.of(), true, 20.0);
+
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).hasSize(1);
+        assertThat(result.warnings()).noneMatch(warning -> warning.contains("preview only"));
+    }
+
+    @Test
+    void autoAddStillFindsAChargerWhenTheCarsMaximumChargingSpeedIsUnknown() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var unknownLimits = new EvVehicleSpec(60.0, 20.0, null, null, List.of(EvConnectorType.CCS2),
+                new CanonicalEnergy.Model("CONSUMPTION", 20.0, 60.0, null));
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(),
+                270, 3600, List.of(candidate(charger("new", 13, 101, 120, .9, false), 120, 0, null)))));
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), unknownLimits,
+                80.0, 12.0, 100.0, 20.0, List.of(), List.of(), true, 20.0);
+
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).hasSize(1);
+        assertThat(result.chargeStops().getFirst().chargeMinutes()).isPositive();
+    }
+
     private EvRouteOptimizationRequest requestWithVehicleConnectors(EvConnectorType... connectors) {
         return new EvRouteOptimizationRequest(
                 "day-1",
