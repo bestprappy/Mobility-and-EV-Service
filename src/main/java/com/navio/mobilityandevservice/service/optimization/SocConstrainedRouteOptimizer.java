@@ -363,7 +363,7 @@ public class SocConstrainedRouteOptimizer {
     }
 
     private Double consumedSocPct(double distanceKm, EvVehicleSpec vehicle) {
-        return CanonicalEnergy.calculate(new CanonicalEnergy.Input(vehicle.resolvedModel(), distanceKm, "ROUTED", 100.0, null, null, 12.0)).nominalSocUsePct();
+        return CanonicalEnergy.calculate(new CanonicalEnergy.Input(vehicle.resolvedModel(), distanceKm, "ROUTED", 100.0, null, null, 12.0)).planningSocUsePct();
     }
 
     static Double chargeMinutes(double arrivalSocPct, double targetSocPct, EvChargerResponse charger, EvVehicleSpec vehicle) {

@@ -1,5 +1,5 @@
 {
-  "policyVersion": "navio-energy-v1",
+  "policyVersion": "navio-energy-v2",
   "tolerance": 1e-09,
   "cases": [
     {
@@ -65,7 +65,7 @@
       "expected": {
         "nominalEnergyKwh": null,
         "nominalSocUsePct": 25,
-        "rawPredictedArrivalSocPct": 55,
+        "rawPredictedArrivalSocPct": 48.75,
         "provisional": true
       }
     },
@@ -430,6 +430,102 @@
         "chargeEnergyKwh": null,
         "nominalChargeMinutes": null
       }
+    },
+    {
+      "name": "factory range retains capacity and consumes full pack over planning range",
+      "input": {
+        "model": {
+          "modelKind": "RATED_RANGE",
+          "ratedRangeKm": 480,
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": 60
+        },
+        "distanceKm": 384,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 100,
+        "charging": null,
+        "observedSocPct": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 48,
+        "planningEnergyKwh": 60,
+        "planningSocUsePct": 100,
+        "rawPredictedArrivalSocPct": 0,
+        "rangeReductionPct": 20
+      }
+    },
+    {
+      "name": "factory consumption allowance uses reciprocal not plus twenty percent",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "ratedRangeKm": 480,
+          "consumptionKwhPer100km": 18,
+          "usableBatteryCapacityKwh": 60,
+          "consumptionSource": "MANUFACTURER_REPORTED"
+        },
+        "distanceKm": 100,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "charging": null,
+        "observedSocPct": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "nominalEnergyKwh": 18,
+        "planningEnergyKwh": 22.5,
+        "nominalSocUsePct": 30,
+        "planningSocUsePct": 37.5,
+        "rawPredictedArrivalSocPct": 42.5,
+        "rangeReductionPct": 20
+      }
+    },
+    {
+      "name": "observed consumption is not reduced twice",
+      "input": {
+        "model": {
+          "modelKind": "CONSUMPTION",
+          "ratedRangeKm": 480,
+          "consumptionKwhPer100km": 18,
+          "usableBatteryCapacityKwh": 60,
+          "consumptionSource": "USER_OBSERVED"
+        },
+        "distanceKm": 100,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 80,
+        "charging": null,
+        "observedSocPct": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "planningEnergyKwh": 18,
+        "planningSocUsePct": 30,
+        "rawPredictedArrivalSocPct": 50,
+        "rangeReductionPct": 0
+      }
+    },
+    {
+      "name": "factory range deficit stays infeasible",
+      "input": {
+        "model": {
+          "modelKind": "RATED_RANGE",
+          "ratedRangeKm": 480,
+          "consumptionKwhPer100km": null,
+          "usableBatteryCapacityKwh": 60
+        },
+        "distanceKm": 480,
+        "distanceQuality": "ROUTED",
+        "departureSocPct": 100,
+        "charging": null,
+        "observedSocPct": null,
+        "reserveSocPct": 12
+      },
+      "expected": {
+        "rawPredictedArrivalSocPct": -25,
+        "predictedLegFeasibility": "INFEASIBLE",
+        "departureSocPct": null
+      }
     }
   ],
   "trips": [
@@ -471,17 +567,17 @@
       "expected": [
         {
           "startingSocPct": 100,
-          "rawPredictedArrivalSocPct": 72,
+          "rawPredictedArrivalSocPct": 65,
           "departureSocPct": 68
         },
         {
           "startingSocPct": 68,
-          "rawPredictedArrivalSocPct": 58,
+          "rawPredictedArrivalSocPct": 55.5,
           "departureSocPct": 50
         },
         {
           "startingSocPct": 50,
-          "departureSocPct": 40
+          "departureSocPct": 37.5
         }
       ]
     },
@@ -522,14 +618,14 @@
       ],
       "expected": [
         {
-          "departureSocPct": 72
+          "departureSocPct": 65
         },
         {
-          "rawPredictedArrivalSocPct": 62,
+          "rawPredictedArrivalSocPct": 52.5,
           "departureSocPct": 50
         },
         {
-          "departureSocPct": 40
+          "departureSocPct": 37.5
         }
       ]
     },
@@ -578,7 +674,7 @@
       ],
       "expected": [
         {
-          "rawPredictedArrivalSocPct": -7,
+          "rawPredictedArrivalSocPct": -27,
           "departureSocPct": null,
           "predictedLegFeasibility": "INFEASIBLE"
         },

@@ -3,12 +3,25 @@ package com.navio.mobilityandevservice.domain.energy;
 import java.util.ArrayList;
 import java.util.List;
 
-/** navio-energy-v1: nominal calculations only; never infer usable capacity. */
+/** Factory inputs stay unchanged. A stated road-trip allowance adjusts planning, never battery capacity. */
 public final class CanonicalEnergy {
-    public static final String VERSION = "navio-energy-v1";
+    public static final String VERSION = "navio-energy-v2";
     public static final double EPSILON = 1e-9;
     private CanonicalEnergy() {}
-    public record Model(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Pattern(regexp="CONSUMPTION|RATED_RANGE|UNAVAILABLE") String modelKind, @jakarta.validation.constraints.Positive Double consumptionKwhPer100km, @jakarta.validation.constraints.Positive Double usableBatteryCapacityKwh, @jakarta.validation.constraints.Positive Double ratedRangeKm) {}
+    public record Model(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Pattern(regexp="CONSUMPTION|RATED_RANGE|UNAVAILABLE") String modelKind,
+                        @jakarta.validation.constraints.Positive Double consumptionKwhPer100km,
+                        @jakarta.validation.constraints.Positive Double usableBatteryCapacityKwh,
+                        @jakarta.validation.constraints.Positive Double ratedRangeKm,
+                        @jakarta.validation.constraints.Pattern(regexp="MANUFACTURER_REPORTED|REGULATORY_REPORTED|USER_OBSERVED|UNKNOWN") String consumptionSource) {
+        public Model(String modelKind, Double consumptionKwhPer100km, Double usableBatteryCapacityKwh, Double ratedRangeKm) {
+            this(modelKind, consumptionKwhPer100km, usableBatteryCapacityKwh, ratedRangeKm, null);
+        }
+    }
+    /** All EVs/chemistries use this policy; observed/unconfirmed consumption is not adjusted twice. */
+    public static double rangeReductionPct(Model model) {
+        return "RATED_RANGE".equals(model.modelKind()) || ("CONSUMPTION".equals(model.modelKind())
+                && ("MANUFACTURER_REPORTED".equals(model.consumptionSource()) || "REGULATORY_REPORTED".equals(model.consumptionSource()))) ? 20 : 0;
+    }
     public record Charging(Double targetSocPct, Double durationMinutes, Boolean compatible, Double effectivePowerKw) {}
     public record Input(Model model, Double distanceKm, String distanceQuality, Double departureSocPct,
                         Double observedSocPct, Charging charging, Double reserveSocPct) {}
@@ -17,7 +30,8 @@ public final class CanonicalEnergy {
                          Double nominalEnergyKwh, Double nominalSocUsePct, Double rawPredictedArrivalSocPct,
                          Double displayArrivalSocPct, Double observedSocPct, Double departureSocPct,
                          String predictedArrivalReserveStatus, String predictedLegFeasibility,
-                         Double chargeEnergyKwh, Double nominalChargeMinutes) {}
+                         Double chargeEnergyKwh, Double nominalChargeMinutes,
+                         Double planningEnergyKwh, Double planningSocUsePct, double rangeReductionPct) {}
     public record Stop(String id, String dayId, Double distanceKm, String distanceQuality, Double observedSocPct, Charging charging) {}
     public record ProjectedStop(String id, String dayId, Double startingSocPct, Result result) {}
     public static List<ProjectedStop> project(Model model, Double initialSocPct, List<Stop> stops, double reserveSocPct) {
@@ -51,7 +65,10 @@ public final class CanonicalEnergy {
             else reasons.add("USABLE_CAPACITY_UNAVAILABLE");
         } else reasons.add("ENERGY_MODEL_UNAVAILABLE");
         if (distance != null && distance == 0) { energy = 0.0; depletion = 0.0; }
-        Double arrival = validSoc(input.departureSocPct()) && depletion != null ? input.departureSocPct() - depletion : null;
+        double retention = 1 - rangeReductionPct(model) / 100;
+        Double planningEnergy = energy == null ? null : energy / retention;
+        Double planningDepletion = depletion == null ? null : depletion / retention;
+        Double arrival = validSoc(input.departureSocPct()) && planningDepletion != null ? input.departureSocPct() - planningDepletion : null;
         if (!validSoc(input.departureSocPct())) reasons.add("UPSTREAM_SOC_UNAVAILABLE");
         Double observed = input.observedSocPct();
         if (observed != null && !validSoc(observed)) throw new IllegalArgumentException("Observed SoC must be between 0 and 100");
@@ -93,6 +110,7 @@ public final class CanonicalEnergy {
                 List.copyOf(reasons), distance == null ? "UNAVAILABLE" : input.distanceQuality(), energy, depletion, arrival,
                 arrival == null ? null : Math.max(0, Math.min(100, arrival)), observed, departure,
                 arrival == null ? "UNKNOWN" : arrival + EPSILON >= reserve ? "AT_OR_ABOVE_RESERVE" : "BELOW_RESERVE",
-                arrival == null ? "UNKNOWN" : infeasible ? "INFEASIBLE" : "FEASIBLE", chargeEnergy, chargeMinutes);
+                arrival == null ? "UNKNOWN" : infeasible ? "INFEASIBLE" : "FEASIBLE", chargeEnergy, chargeMinutes,
+                planningEnergy, planningDepletion, rangeReductionPct(model));
     }
 }
