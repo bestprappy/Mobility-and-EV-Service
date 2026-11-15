@@ -1100,6 +1100,55 @@ class EvRouteOptimizationServiceTests {
         assertThat(result.chargeStops().getFirst().chargeMinutes()).isPositive();
     }
 
+    @Test
+    void autoAddChargesWhenTheDayStartsBelowTheBatteryThreshold() {
+        // Found in the real run: start 80%, threshold 87%, minimum arrival 10%. Requiring 87% on arrival at the
+        // charger itself made every plan impossible, so Auto Add reported no workable plan beside many chargers.
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                80.0, 87.0, 100.0, 20.0, List.of(), List.of(), true, 10.0);
+
+        var response = optimize(request, charger("roadside", 13, 101.4, 120, .9, false));
+
+        assertThat(response.feasible()).isTrue();
+        assertThat(response.operations()).singleElement().satisfies(operation -> {
+            assertThat(operation.type()).isEqualTo(EvPlanOperationType.ADD_CHARGER);
+            assertThat(operation.arrivalSocPct()).isLessThan(87.0).isGreaterThanOrEqualTo(10.0);
+            assertThat(operation.departureSocPct()).isEqualTo(100.0);
+        });
+        assertThat(response.finalSocPct()).isGreaterThanOrEqualTo(10.0);
+    }
+
+    @Test
+    void autoAddKeepsItineraryStopsAboveTheThresholdByChargingBeforeThem() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var museum = new EvRouteStopRequest("museum", "Museum", 13, 101.5, null, false, null);
+        var stops = List.of(base.stops().getFirst(), museum, base.stops().getLast());
+        var request = new EvRouteOptimizationRequest(base.blockId(), stops, base.vehicle(),
+                80.0, 87.0, 100.0, 20.0, List.of(), List.of(), true, 10.0);
+        var route = new OptimizationRoute(List.of(
+                span(0, stops.get(0), museum, 60, 3600, List.of(candidate(charger("early", 13, 100.1, 120, .9, false), 5, 0, null),
+                        candidate(charger("late", 13, 101.4, 120, .9, false), 55, 0, null))),
+                span(1, museum, stops.get(2), 60, 3600, List.of())));
+
+        var result = new SocConstrainedRouteOptimizer().optimize(route, request);
+
+        assertThat(result.feasible()).isTrue();
+        assertThat(result.chargeStops()).singleElement()
+                .satisfies(stop -> assertThat(stop.candidate().charger().id()).isEqualTo("late"));
+    }
+
+    @Test
+    void autoAddNeverReachesAChargerBelowTheLowerOfTheTwoPreferences() {
+        var base = requestWithVehicleConnectors(EvConnectorType.CCS2);
+        var request = new EvRouteOptimizationRequest(base.blockId(), base.stops(), base.vehicle(),
+                30.0, 87.0, 100.0, 20.0, List.of(), List.of(), true, 10.0);
+        var route = new OptimizationRoute(List.of(span(0, base.stops().getFirst(), base.stops().getLast(), 200, 7200,
+                List.of(candidate(charger("too-far", 13, 101, 120, .9, false), 70, 0, null)))));
+
+        assertThat(new SocConstrainedRouteOptimizer().optimize(route, request).feasible()).isFalse();
+    }
+
     private EvRouteOptimizationRequest requestWithVehicleConnectors(EvConnectorType... connectors) {
         return new EvRouteOptimizationRequest(
                 "day-1",
